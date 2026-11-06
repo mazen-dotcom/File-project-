@@ -83,10 +83,11 @@ int FixedFieldBuffer::Unpack(void* field, int maxBytes) {
 int FixedFieldBuffer::Read(istream& stream) {
     Clear();
     stream.read(Buffer, BufferSize);
-    if (!stream)
+    int bytesRead = stream.gcount();
+    if(bytesRead == 0){
         return -1;
-
-    return BufferSize;
+    }
+    return bytesRead;
 }
 
 int FixedFieldBuffer::Write(std::ostream& stream) {

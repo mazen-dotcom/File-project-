@@ -20,6 +20,7 @@ bool BufferFile::Open(const string& fileName) {
         if (!createFile)
             return false;
         createFile.close();
+        File.close();
         File.clear();
         File.open(FileName.c_str(), ios::in | ios::out | ios::binary);
     }
@@ -29,12 +30,18 @@ bool BufferFile::Open(const string& fileName) {
     streamoff fileSize = File.tellg();
     if (fileSize == 0) {
         availHead = -1;
+        File.seekp(0 , ios::beg);
         if (!WriteHeader()) {
             Close();
             return false;
         }
     } else {
-        if (fileSize < HeaderSize || ReadHeader() == -2) {
+        if (fileSize < HeaderSize) {
+            Close();
+            return false;
+        }
+        File.seekg(0,ios::beg);
+        if(ReadHeader() == -2){
             Close();
             return false;
         }

@@ -5,7 +5,7 @@
 #include <string>
 using namespace std;
 class BufferFile {
-private:
+protected:
     fstream File;
     FixedFieldBuffer& Buffer;
     int HeaderSize;
@@ -13,7 +13,7 @@ private:
     string FileName;
     bool IsOpen() const;
     bool IsValidRecordAddress(int recAddr);
-
+    
 public:
     explicit BufferFile(FixedFieldBuffer& buffer);
     ~BufferFile();
