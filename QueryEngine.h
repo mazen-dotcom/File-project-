@@ -128,6 +128,30 @@ public:
     const Instructions &GetInstructions() const { return currentInstructions; }
     void ResetInstructions();
 
+    // Insert Operations
+    bool AddDoctor(const std::string &id,
+                   const std::string &name,
+                   const std::string &specialty,
+                   const std::string &address);
+
+    bool AddAppointment(const std::string &id,
+                        const std::string &date,
+                        const std::string &doctorID);
+
+    // Update & Delete Operations
+    bool UpdateDoctor(const std::string &doctorID,
+                      const std::string &newName = "",
+                      const std::string &newSpecialty = "",
+                      const std::string &newAddress = "");
+
+    bool DeleteDoctor(const std::string &doctorID);
+
+    bool UpdateAppointment(const std::string &appID,
+                           const std::string &newDate = "",
+                           const std::string &newDoctorID = "");
+
+    bool DeleteAppointment(const std::string &appID);
+
     PrimaryIndex &GetDocPrimaryIndex() { return docPrimaryIndex; }
     PrimaryIndex &GetAppPrimaryIndex() { return appPrimaryIndex; }
     SecondaryIndex &GetAppSecDocIDIndex() { return appSecDocIDIndex; }
@@ -135,6 +159,8 @@ public:
     SecondaryIndex &GetDocSecSpecIndex() { return docSecSpecIndex; }
     RecordFile &GetDoctorFile() { return doctorfile; }
     RecordFile &GetAppointmentFile() { return appointmentFile; }
+    FixedFieldBuffer &GetDocBuffer() { return docBuffer; }
+    FixedFieldBuffer &GetAppBuffer() { return appBuffer; }
 };
 
 #endif // QUERY_ENGINE_H

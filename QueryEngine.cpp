@@ -292,6 +292,280 @@ void QueryEngine::ResetInstructions()
     currentInstructions.select_statment.clear();
 }
 
+// ============================================================================
+// Insert Operations
+// ============================================================================
+
+bool QueryEngine::AddDoctor(const string &id,
+                             const string &name,
+                             const string &specialty,
+                             const string &address)
+{
+    // 1. Check that the doctor isn't already there
+    if (docPrimaryIndex.Search(id) != -1) {
+        cout << "Error: Doctor with ID '" << id << "' already exists!" << endl;
+        return false;
+    }
+    
+    // 2. Make sure the ID isn't empty
+    if (id.empty() || id.length() > 15) {
+        cout << "Error: Invalid Doctor ID!" << endl;
+        return false;
+    }
+    
+    // 3. Prepare a Doctor object
+    Doctor doc;
+    
+    // Copy ID
+    memset(doc.id, ' ', sizeof(doc.id));
+    memcpy(doc.id, id.c_str(), min(id.length(), sizeof(doc.id)));
+    
+    // Copy Name
+    memset(doc.name, ' ', sizeof(doc.name));
+    memcpy(doc.name, name.c_str(), min(name.length(), sizeof(doc.name)));
+    
+    // Copy Specialty
+    memset(doc.specialty, ' ', sizeof(doc.specialty));
+    memcpy(doc.specialty, specialty.c_str(), min(specialty.length(), sizeof(doc.specialty)));
+    
+    // Copy Address
+    memset(doc.address, ' ', sizeof(doc.address));
+    memcpy(doc.address, address.c_str(), min(address.length(), sizeof(doc.address)));
+    
+    // 4. Fill the buffer
+    doc.Pack(docBuffer);
+    
+    // 5. Write to the file (it will use the deleted space if available, or it will add at the end)
+    int offset = doctorfile.Write(-1);  // -1 means: use availHead or add at the end
+    if (offset == -1) {
+        cout << "Error: Failed to write to data file!" << endl;
+        return false;
+    }
+    
+    // 6. Add to the Primary Index
+    if (!docPrimaryIndex.Insert(id, offset)) {
+        cout << "Error: Failed to insert into primary index!" << endl;
+        return false;
+    }
+    
+    // 7. Add to the Secondary Indices
+    docSecNameIndex.Insert(name.c_str(), id.c_str());
+    docSecSpecIndex.Insert(specialty.c_str(), id.c_str());
+    
+    return true;
+}
+
+bool QueryEngine::AddAppointment(const string &id,
+                                  const string &date,
+                                  const string &doctorID)
+{
+    // 1. Make sure the appointment doesn't already exist
+    if (appPrimaryIndex.Search(id) != -1) {
+        cout << "Error: Appointment with ID '" << id << "' already exists!" << endl;
+        return false;
+    }
+    
+    // 2. Check if the doctor is around
+    if (docPrimaryIndex.Search(doctorID) == -1) {
+        cout << "Error: Doctor with ID '" << doctorID << "' does not exist!" << endl;
+        return false;
+    }
+    
+    // 3. Make sure the ID isn't empty
+    if (id.empty() || id.length() > 15) {
+        cout << "Error: Invalid Appointment ID!" << endl;
+        return false;
+    }
+    
+    // 4. Prepare a Appointments object
+    Appointments app;
+    
+    // Copy ID
+    memset(app.ID, ' ', sizeof(app.ID));
+    memcpy(app.ID, id.c_str(), min(id.length(), sizeof(app.ID)));
+    
+    // Copy Date
+    memset(app.Date, ' ', sizeof(app.Date));
+    memcpy(app.Date, date.c_str(), min(date.length(), sizeof(app.Date)));
+    
+    // Copy Doctor ID
+    memset(app.doctor_ID, ' ', sizeof(app.doctor_ID));
+    memcpy(app.doctor_ID, doctorID.c_str(), min(doctorID.length(), sizeof(app.doctor_ID)));
+    
+    // 5. Fill the buffer
+    app.Pack(appBuffer);
+    
+    // 6. Write to the file (it will use the deleted space if available, or it will add at the end)
+    int offset = appointmentFile.Write(-1); // -1 means: use availHead or add at the end
+    if (offset == -1) {
+        cout << "Error: Failed to write to data file!" << endl;
+        return false;
+    }
+    
+    // 7. أضف إلى الـ Primary Index
+    if (!appPrimaryIndex.Insert(id, offset)) {
+        cout << "Error: Failed to insert into primary index!" << endl;
+        return false;
+    }
+    
+    // 8. أضف إلى الـ Secondary Index
+    appSecDocIDIndex.Insert(doctorID.c_str(), id.c_str());
+    
+    return true;
+}
+
+// ============================================================================
+// Update & Delete Operations
+// ============================================================================
+
+bool QueryEngine::UpdateDoctor(const string &doctorID,
+                                const string &newName,
+                                const string &newSpecialty,
+                                const string &newAddress)
+{
+    // 1. Look for the offset from the Primary Index
+    int offset = docPrimaryIndex.Search(doctorID);
+    if (offset == -1)
+        return false;
+    
+    // 2. Read the current record
+    Doctor doc;
+    if (!SearchDoctorByID(doctorID, doc))
+        return false;
+    
+    // 3. Keep the old values (for Secondary Indices)
+    string oldName = TrimField(doc.name, sizeof(doc.name));
+    string oldSpec = TrimField(doc.specialty, sizeof(doc.specialty));
+    
+    // 4. Update only the required fields (if they're not empty)
+    if (!newName.empty()) {
+        memset(doc.name, ' ', sizeof(doc.name));
+        memcpy(doc.name, newName.c_str(), min(newName.length(), sizeof(doc.name)));
+    }
+    if (!newSpecialty.empty()) {
+        memset(doc.specialty, ' ', sizeof(doc.specialty));
+        memcpy(doc.specialty, newSpecialty.c_str(), min(newSpecialty.length(), sizeof(doc.specialty)));
+    }
+    if (!newAddress.empty()) {
+        memset(doc.address, ' ', sizeof(doc.address));
+        memcpy(doc.address, newAddress.c_str(), min(newAddress.length(), sizeof(doc.address)));
+    }
+    
+    // 5. Fill the buffer with the new data
+    doc.Pack(docBuffer);
+    
+    // 6. Write at the same offset (Update in the same place)
+    if (doctorfile.Write(offset) == -1)
+        return false;
+    
+    // 7. Update the secondary indices if the name or major changes
+    if (!newName.empty() && oldName != newName) {
+        docSecNameIndex.Remove(oldName.c_str(), doctorID.c_str());
+        docSecNameIndex.Insert(newName.c_str(), doctorID.c_str());
+    }
+    if (!newSpecialty.empty() && oldSpec != newSpecialty) {
+        docSecSpecIndex.Remove(oldSpec.c_str(), doctorID.c_str());
+        docSecSpecIndex.Insert(newSpecialty.c_str(), doctorID.c_str());
+    }
+    
+    return true;
+}
+
+bool QueryEngine::DeleteDoctor(const string &doctorID)
+{
+    // 1. Look for the offset from the Primary Index
+    int offset = docPrimaryIndex.Search(doctorID);
+    if (offset == -1)
+        return false;
+    
+    // 2. Read the record to get the data (to delete it from Secondary Indices)
+    Doctor doc;
+    if (!SearchDoctorByID(doctorID, doc))
+        return false;
+    
+    string name = TrimField(doc.name, sizeof(doc.name));
+    string spec = TrimField(doc.specialty, sizeof(doc.specialty));
+    
+    // 3. Delete from the data file (put '*' in the first byte)
+    if (!doctorfile.Delete(offset))
+        return false;
+    
+    // 4. Delete from the Primary Index
+    docPrimaryIndex.Delete(doctorID);
+    
+    // 5. Delete from the Secondary Indices
+    docSecNameIndex.Remove(name.c_str(), doctorID.c_str());
+    docSecSpecIndex.Remove(spec.c_str(), doctorID.c_str());
+    
+    return true;
+}
+
+bool QueryEngine::UpdateAppointment(const string &appID,
+                                     const string &newDate,
+                                     const string &newDoctorID)
+{
+    // 1. Look for the offset
+    int offset = appPrimaryIndex.Search(appID);
+    if (offset == -1)
+        return false;
+    
+    // 2. Read the current record
+    Appointments app;
+    if (!SearchAppointmentByID(appID, app))
+        return false;
+    
+    // 3. Save the old values
+    string oldDocID = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+    
+    // 4. Update the required fields
+    if (!newDate.empty()) {
+        memset(app.Date, ' ', sizeof(app.Date));
+        memcpy(app.Date, newDate.c_str(), min(newDate.length(), sizeof(app.Date)));
+    }
+    if (!newDoctorID.empty()) {
+        memset(app.doctor_ID, ' ', sizeof(app.doctor_ID));
+        memcpy(app.doctor_ID, newDoctorID.c_str(), min(newDoctorID.length(), sizeof(app.doctor_ID)));
+    }
+    
+    // 5. Pack and Write
+    app.Pack(appBuffer);
+    if (appointmentFile.Write(offset) == -1)
+        return false;
+    
+    // 6. Update the secondary index if DoctorID changes
+    if (!newDoctorID.empty() && oldDocID != newDoctorID) {
+        appSecDocIDIndex.Remove(oldDocID.c_str(), appID.c_str());
+        appSecDocIDIndex.Insert(newDoctorID.c_str(), appID.c_str());
+    }
+    
+    return true;
+}
+
+bool QueryEngine::DeleteAppointment(const string &appID)
+{
+    // 1. Look for the offset
+    int offset = appPrimaryIndex.Search(appID);
+    if (offset == -1)
+        return false;
+    
+    // 2. Read the current record
+    Appointments app;
+    if (!SearchAppointmentByID(appID, app))
+        return false;
+    
+    string docID = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+    
+    // 3. Delete from the data file (put '*' in the first byte)
+    if (!appointmentFile.Delete(offset))
+        return false;
+    
+    // 4. Delete from the Indices
+    appPrimaryIndex.Delete(appID);
+    appSecDocIDIndex.Remove(docID.c_str(), appID.c_str());
+    
+    return true;
+}
+
 bool QueryEngine::OpenDataFiles(const string &docDataFile, const string &appDataFile)
 {
     if (!docDataFile.empty()) doctorDataFileName = docDataFile;
