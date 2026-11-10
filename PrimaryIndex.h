@@ -58,6 +58,9 @@ public:
     bool Insert(const std::string& id, int rrn);
     bool Insert(const IndexEntry& entry);
 
+    // FIX: Bug 2 - Add UpdateKey with shifting to update primary keys while maintaining sorted order
+    bool UpdateKey(const std::string& oldId, const std::string& newId, int* fromPos = nullptr, int* toPos = nullptr);
+
     bool Delete(const char* id);
     bool Delete(const std::string& id);
 
