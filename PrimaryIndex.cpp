@@ -12,9 +12,10 @@ IndexEntry::IndexEntry() : rrn(-1) {
 IndexEntry::IndexEntry(const char* key, int recordRrn) : rrn(recordRrn) {
     std::memset(id, ' ', sizeof(id));
     if (key != nullptr) {
-        size_t len = std::strlen(key);
-        if (len > sizeof(id)) {
-            len = sizeof(id);
+        // FIX: Bug 3 - Bound key copy loop to sizeof(id) to prevent buffer overrun on non-null-terminated raw 15-byte char fields
+        size_t len = 0;
+        while (len < sizeof(id) && key[len] != '\0') {
+            len++;
         }
         std::memcpy(id, key, len);
     }
@@ -136,25 +137,131 @@ bool PrimaryIndex::Insert(const char* id, int rrn) {
         return false;
     }
 
-    if (Search(id) != -1) {
-        return false; // Unique primary key constraint
+    // FIX: Bug 4 - Reject empty keys, keys starting with '*', and keys longer than 15 characters
+    if (id[0] == '\0' || id[0] == '*') {
+        return false;
     }
 
-    entries.emplace_back(id, rrn);
+    std::string trimmed = TrimKey(id, 15);
+    if (trimmed.empty() || trimmed[0] == '*') {
+        return false;
+    }
 
-    std::sort(entries.begin(), entries.end(), [](const IndexEntry& a, const IndexEntry& b) {
-        return PrimaryIndex::CompareKeys(a.id, b.id) < 0;
-    });
+    size_t keyLen = 0;
+    while (keyLen <= 15 && id[keyLen] != '\0') {
+        keyLen++;
+    }
+    if (keyLen > 15) {
+        return false;
+    }
+
+    // FIX: Bug 6 - Replace emplace_back + std::sort with binary search for insertion position followed by shifting (O(N))
+    int low = 0;
+    int high = static_cast<int>(entries.size()) - 1;
+    int insertPos = static_cast<int>(entries.size());
+
+    while (low <= high) {
+        int mid = low + (high - low) / 2;
+        int cmp = CompareKeys(entries[mid].id, id);
+        if (cmp == 0) {
+            return false; // Unique primary key constraint
+        } else if (cmp > 0) {
+            insertPos = mid;
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    entries.emplace_back();
+    for (int i = static_cast<int>(entries.size()) - 1; i > insertPos; --i) {
+        entries[i] = entries[i - 1];
+    }
+    entries[insertPos] = IndexEntry(id, rrn);
 
     return true;
 }
 
 bool PrimaryIndex::Insert(const std::string& id, int rrn) {
+    // FIX: Bug 4 - Explicitly validate std::string key before delegating
+    if (id.empty() || id.length() > 15 || id[0] == '*') {
+        return false;
+    }
     return Insert(id.c_str(), rrn);
 }
 
 bool PrimaryIndex::Insert(const IndexEntry& entry) {
+    // FIX: Bug 4 - Explicitly validate entry fields before delegating
+    if (entry.id[0] == '\0' || entry.id[0] == '*' || entry.rrn < 0) {
+        return false;
+    }
     return Insert(entry.id, entry.rrn);
+}
+
+// FIX: Bug 2 - Implement UpdateKey with shifting to update primary keys while maintaining sorted order
+bool PrimaryIndex::UpdateKey(const std::string& oldId, const std::string& newId,
+                             int* fromPos, int* toPos) {
+    if (oldId.empty() || newId.empty() || newId.length() > 15 || newId[0] == '*') {
+        return false;
+    }
+
+    std::string trimmedNew = TrimKey(newId.c_str(), 15);
+    if (trimmedNew.empty() || trimmedNew[0] == '*') {
+        return false;
+    }
+
+    // Binary search oldId (return false if missing)
+    int oldPos = FindIndex(oldId);
+    if (oldPos == -1) {
+        return false;
+    }
+
+    // Return false if newId already exists
+    if (FindIndex(newId) != -1) {
+        return false;
+    }
+
+    // Keep the entry's offset
+    int savedRrn = entries[oldPos].rrn;
+    if (fromPos != nullptr) {
+        *fromPos = oldPos;
+    }
+
+    // SHIFT entries left to close the old slot (explicit loop, not erase)
+    for (size_t i = oldPos; i + 1 < entries.size(); ++i) {
+        entries[i] = entries[i + 1];
+    }
+    entries.pop_back();
+
+    // Binary-search the new sorted position
+    int low = 0;
+    int high = static_cast<int>(entries.size()) - 1;
+    int newPos = static_cast<int>(entries.size());
+
+    while (low <= high) {
+        int mid = low + (high - low) / 2;
+        int cmp = CompareKeys(entries[mid].id, newId.c_str());
+        if (cmp > 0) {
+            newPos = mid;
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    // SHIFT entries right to open that slot (explicit loop, not insert)
+    entries.emplace_back();
+    for (int i = static_cast<int>(entries.size()) - 1; i > newPos; --i) {
+        entries[i] = entries[i - 1];
+    }
+
+    // Place the entry and report toPos
+    entries[newPos] = IndexEntry(newId.c_str(), savedRrn);
+    if (toPos != nullptr) {
+        *toPos = newPos;
+    }
+
+    return true;
 }
 
 bool PrimaryIndex::Delete(const char* id) {
@@ -179,6 +286,14 @@ bool PrimaryIndex::SaveToDisk(const std::string& fileName) {
     std::string targetFile = fileName.empty() ? indexFileName : fileName;
     if (targetFile.empty()) {
         return false;
+    }
+
+    // FIX: Bug 1 - Truncate target file before RecordFile::Open so trailing ghost entries from earlier states are eliminated
+    {
+        std::ofstream truncStream(targetFile.c_str(), std::ios::binary | std::ios::trunc);
+        if (!truncStream.is_open()) {
+            return false;
+        }
     }
 
     // Configure FixedFieldBuffer for the index entry size (15 ID + 4 RRN = 19 bytes)
@@ -233,6 +348,13 @@ bool PrimaryIndex::LoadFromDisk(const std::string& fileName) {
     }
 
     int headerSize = file.GetHeaderSize();
+    // FIX: Bug 5 - Treat a 0-byte file (before Open) or header-only file (fileSize == headerSize) as a valid empty index
+    if (fileSize == 0 || fileSize == headerSize) {
+        file.Close();
+        entries.clear();
+        return true;
+    }
+
     if (fileSize < headerSize) {
         file.Close();
         entries.clear();
