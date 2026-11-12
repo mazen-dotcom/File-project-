@@ -540,7 +540,22 @@ QueryEngine::QueryEngine()
     LoadIndexes();
 }
 
-QueryEngine::QueryEngine(const string &docDataFile, const string &appDataFile)
+void QueryEngine::SetIndexDirectory(const string &dir)
+{
+    string prefix = dir;
+    if (!prefix.empty() && prefix.back() != '/' && prefix.back() != '\\')
+    {
+        prefix += "/";
+    }
+
+    docPrimaryIndex.SetFileName(prefix + "doctor_primary.pidx");
+    appPrimaryIndex.SetFileName(prefix + "app_primary.pidx");
+    appSecDocIDIndex.SetFileNames(prefix + "app_sec_docID.sidx", prefix + "app_sec_docID_list.sidx");
+    docSecNameIndex.SetFileNames(prefix + "doc_sec_name.sidx", prefix + "doc_sec_name_list.sidx");
+    docSecSpecIndex.SetFileNames(prefix + "doc_sec_spec.sidx", prefix + "doc_sec_spec_list.sidx");
+}
+
+QueryEngine::QueryEngine(const string &docDataFile, const string &appDataFile, const string &indexDir)
     : doctorfile(docBuffer),
       appointmentFile(appBuffer),
       docPrimaryIndex("doctor_primary.pidx"),
@@ -553,6 +568,10 @@ QueryEngine::QueryEngine(const string &docDataFile, const string &appDataFile)
 {
     InitializeBuffers();
     ResetInstructions();
+    if (!indexDir.empty())
+    {
+        SetIndexDirectory(indexDir);
+    }
     OpenDataFiles(doctorDataFileName, appointmentDataFileName);
     LoadIndexes();
 }

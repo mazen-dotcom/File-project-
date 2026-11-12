@@ -21,6 +21,7 @@ using namespace std;
 
 const string DOC_DAT = "data/doctors.dat";
 const string APP_DAT = "data/appointments.dat";
+const string INDEX_DIR = "indexes";
 
 const size_t ID_LEN = sizeof(Doctor::id), DNAME_LEN = sizeof(Doctor::name),
              SPEC_LEN = sizeof(Doctor::specialty), ADDR_LEN = sizeof(Doctor::address),
@@ -302,7 +303,7 @@ int main() {
     filesystem::create_directories("data", ec);     // BufferFile::Open needs the folder to exist
     filesystem::create_directories("indexes", ec);  // index files folder
 
-    QueryEngine db(DOC_DAT, APP_DAT);      // opens both data files and loads the saved indexes
+    QueryEngine db(DOC_DAT, APP_DAT, INDEX_DIR);      // opens both data files and loads the saved indexes
     db.RebuildIndexes();
     db.SaveIndexes();
     bool fresh = db.GetDocPrimaryIndex().IsEmpty() && db.GetAppPrimaryIndex().IsEmpty();

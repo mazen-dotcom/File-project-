@@ -96,8 +96,12 @@ private:
 public:
     static std::string TrimField(const char *data, size_t maxLen);
     QueryEngine();
-    explicit QueryEngine(const std::string &docDataFile, const std::string &appDataFile);
+    explicit QueryEngine(const std::string &docDataFile,
+                         const std::string &appDataFile,
+                         const std::string &indexDir = "indexes");
     ~QueryEngine();
+
+    void SetIndexDirectory(const std::string &dir);
 
     // Data File & Index Operations
     bool OpenDataFiles(const std::string &docDataFile = "", const std::string &appDataFile = "");
