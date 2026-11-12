@@ -107,6 +107,7 @@ public:
     std::vector<Doctor> SearchDoctorsByName(const std::string &doctorName);
     std::vector<Doctor> SearchDoctorsBySpecialty(const std::string &specialty);
     std::vector<Doctor> SearchDoctorsByNameAndSpecialty(const std::string &name, const std::string &specialty);
+    std::vector<Doctor> SearchDoctorsByNameOrSpecialty(const std::string &name, const std::string &specialty);
     std::vector<Appointments> SearchAppointmentsByDoctorID(const std::string &doctorID);
 
     // Chain of Functions: From -> Where -> Select using Instructions struct

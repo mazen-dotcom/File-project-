@@ -820,6 +820,39 @@ vector<Doctor> QueryEngine::SearchDoctorsByNameAndSpecialty(const string &name, 
     return results;
 }
 
+// FIX: OR counterpart of SearchDoctorsByNameAndSpecialty — uses set_union instead of set_intersection
+vector<Doctor> QueryEngine::SearchDoctorsByNameOrSpecialty(const string &name, const string &specialty)
+{
+    vector<Doctor> results;
+    vector<int> offsetsName = docSecNameIndex.Search(name.c_str(), docPrimaryIndex);
+    vector<int> offsetsSpec = docSecSpecIndex.Search(specialty.c_str(), docPrimaryIndex);
+
+    sort(offsetsName.begin(), offsetsName.end());
+    sort(offsetsSpec.begin(), offsetsSpec.end());
+
+    vector<int> mergedOffsets;
+    set_union(offsetsName.begin(), offsetsName.end(),
+              offsetsSpec.begin(), offsetsSpec.end(),
+              back_inserter(mergedOffsets));
+
+    if (mergedOffsets.empty())
+        return results;
+
+    if (!doctorfile.Open(doctorDataFileName))
+        return results;
+
+    for (int offset : mergedOffsets)
+    {
+        if (doctorfile.Read(offset) != -1)
+        {
+            Doctor doc;
+            doc.Unpack(docBuffer);
+            results.push_back(doc);
+        }
+    }
+    return results;
+}
+
 vector<Appointments> QueryEngine::SearchAppointmentsByDoctorID(const string &doctorID)
 {
     vector<Appointments> results;
@@ -1152,14 +1185,21 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             case SearchStrategy::MultipleSecondaryIndices:
             {
                 string name, spec;
+                // FIX: Detect OR logic among the conditions
+                bool hasOrLogic = false;
                 for (const auto &cond : instructions.where_statment)
                 {
                     if (get<0>(cond) == Field::DoctorName && get<1>(cond) == Op::Equals)
                         name = ExtractStringFromAny(get<2>(cond));
                     if (get<0>(cond) == Field::DoctorSpecialty && get<1>(cond) == Op::Equals)
                         spec = ExtractStringFromAny(get<2>(cond));
+                    if (get<3>(cond) == LogicOp::Or)
+                        hasOrLogic = true;
                 }
-                result.doctors = SearchDoctorsByNameAndSpecialty(name, spec);
+                if (hasOrLogic)
+                    result.doctors = SearchDoctorsByNameOrSpecialty(name, spec);
+                else
+                    result.doctors = SearchDoctorsByNameAndSpecialty(name, spec);
                 break;
             }
             case SearchStrategy::LinearSearch:
@@ -1188,7 +1228,18 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                             doc.Unpack(docBuffer);
                             if (doc.id[0] != '*')
                             {
-                                bool match = true;
+                                // FIX: Determine if conditions use OR logic
+                                bool hasOrLogic = false;
+                                for (const auto &cond : instructions.where_statment)
+                                {
+                                    if (get<3>(cond) == LogicOp::Or)
+                                    {
+                                        hasOrLogic = true;
+                                        break;
+                                    }
+                                }
+
+                                bool match = !hasOrLogic; // AND: start true; OR: start false
                                 for (const auto &cond : instructions.where_statment)
                                 {
                                     Field f = get<0>(cond);
@@ -1201,8 +1252,14 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                                     else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
                                     else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
 
-                                    if (op == Op::Equals && actual != val) match = false;
-                                    if (op == Op::NotEquals && actual == val) match = false;
+                                    bool condMatch = true;
+                                    if (op == Op::Equals && actual != val) condMatch = false;
+                                    if (op == Op::NotEquals && actual == val) condMatch = false;
+
+                                    if (hasOrLogic)
+                                        match = match || condMatch; // OR: any condition makes it true
+                                    else if (!condMatch)
+                                        match = false;              // AND: any mismatch makes it false
                                 }
                                 if (match)
                                     result.doctors.push_back(doc);
@@ -1278,7 +1335,18 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                             app.Unpack(appBuffer);
                             if (app.ID[0] != '*')
                             {
-                                bool match = true;
+                                // FIX: Determine if conditions use OR logic
+                                bool hasOrLogic = false;
+                                for (const auto &cond : instructions.where_statment)
+                                {
+                                    if (get<3>(cond) == LogicOp::Or)
+                                    {
+                                        hasOrLogic = true;
+                                        break;
+                                    }
+                                }
+
+                                bool match = !hasOrLogic; // AND: start true; OR: start false
                                 for (const auto &cond : instructions.where_statment)
                                 {
                                     Field f = get<0>(cond);
@@ -1290,8 +1358,14 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                                     else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
                                     else if (f == Field::DoctorID) actual = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
 
-                                    if (op == Op::Equals && actual != val) match = false;
-                                    if (op == Op::NotEquals && actual == val) match = false;
+                                    bool condMatch = true;
+                                    if (op == Op::Equals && actual != val) condMatch = false;
+                                    if (op == Op::NotEquals && actual == val) condMatch = false;
+
+                                    if (hasOrLogic)
+                                        match = match || condMatch;
+                                    else if (!condMatch)
+                                        match = false;
                                 }
                                 if (match)
                                     result.appointments.push_back(app);
