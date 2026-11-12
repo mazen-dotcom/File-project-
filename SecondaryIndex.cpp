@@ -1,6 +1,7 @@
 #include "SecondaryIndex.h"
 #include <iostream>
 #include <limits>
+#include <filesystem>
 
 using namespace std;
 
@@ -256,6 +257,16 @@ vector<int> SecondaryIndex::Search(const std::string& key, const PrimaryIndex& p
 bool SecondaryIndex::SaveToDisk() {
     if (indexFileName.empty() || linkFileName.empty())
         return false;
+
+    // Ensure parent directory exists if index or link filenames include a folder path (e.g., "indexes/")
+    if (auto p = std::filesystem::path(indexFileName).parent_path(); !p.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p, ec);
+    }
+    if (auto p = std::filesystem::path(linkFileName).parent_path(); !p.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p, ec);
+    }
 
     // FIX: Clear ghost nodes if entries is empty so disk files stay cleanly empty
     if (entries.empty()) {

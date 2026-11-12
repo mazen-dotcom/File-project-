@@ -1,5 +1,6 @@
 #include "PrimaryIndex.h"
 #include <iomanip>
+#include <filesystem>
 
 // ============================================================================
 // IndexEntry Implementation
@@ -286,6 +287,12 @@ bool PrimaryIndex::SaveToDisk(const std::string& fileName) {
     std::string targetFile = fileName.empty() ? indexFileName : fileName;
     if (targetFile.empty()) {
         return false;
+    }
+
+    // Ensure parent directory exists if targetFile includes a folder path (e.g., "indexes/")
+    if (auto p = std::filesystem::path(targetFile).parent_path(); !p.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p, ec);
     }
 
     // FIX: Bug 1 - Truncate target file before RecordFile::Open so trailing ghost entries from earlier states are eliminated

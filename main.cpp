@@ -300,6 +300,7 @@ void showMenu() {
 int main() {
     error_code ec;
     filesystem::create_directories("data", ec);     // BufferFile::Open needs the folder to exist
+    filesystem::create_directories("indexes", ec);  // index files folder
 
     QueryEngine db(DOC_DAT, APP_DAT);      // opens both data files and loads the saved indexes
     db.RebuildIndexes();
