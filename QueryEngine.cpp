@@ -635,44 +635,76 @@ void QueryEngine::RebuildIndexes()
     // Rebuild Doctor indexes
     if (doctorfile.Open(doctorDataFileName))
     {
+        // FIX: BufferFile::Read() returns -1 for BOTH deleted records ('*' marker) AND
+        // end-of-file (invalid address), so using it as the while-loop condition caused the
+        // loop to stop prematurely at the first deleted record, silently skipping all records
+        // after it. Fix: compute the file size independently to bound the loop, and treat
+        // Read()==-1 within bounds as a deleted record to skip (not a loop terminator).
+        int docFileSize = 0;
+        {
+            ifstream sizeCheck(doctorDataFileName, ios::binary | ios::ate);
+            if (sizeCheck.is_open()) {
+                docFileSize = static_cast<int>(sizeCheck.tellg());
+                sizeCheck.close();
+            }
+        }
+
         doctorfile.Rewind();
         int offset = doctorfile.GetHeaderSize();
+        int recordSize = docBuffer.GetBufferSize();
         Doctor doc;
-        while (doctorfile.Read(offset) != -1)
+        while (offset + recordSize <= docFileSize)
         {
-            doc.Unpack(docBuffer);
-            if (doc.id[0] != '*')
+            if (doctorfile.Read(offset) != -1)
             {
-                string id = TrimField(doc.id, sizeof(doc.id));
-                string name = TrimField(doc.name, sizeof(doc.name));
-                string spec = TrimField(doc.specialty, sizeof(doc.specialty));
+                doc.Unpack(docBuffer);
+                if (doc.id[0] != '*')
+                {
+                    string id = TrimField(doc.id, sizeof(doc.id));
+                    string name = TrimField(doc.name, sizeof(doc.name));
+                    string spec = TrimField(doc.specialty, sizeof(doc.specialty));
 
-                docPrimaryIndex.Insert(id, offset);
-                docSecNameIndex.Insert(name.c_str(), id.c_str());
-                docSecSpecIndex.Insert(spec.c_str(), id.c_str());
+                    docPrimaryIndex.Insert(id, offset);
+                    docSecNameIndex.Insert(name.c_str(), id.c_str());
+                    docSecSpecIndex.Insert(spec.c_str(), id.c_str());
+                }
             }
-            offset += docBuffer.GetBufferSize();
+            offset += recordSize;
         }
     }
 
     // Rebuild Appointment indexes
     if (appointmentFile.Open(appointmentDataFileName))
     {
+        // FIX: Same deleted-record / EOF ambiguity fix as above for appointments.
+        int appFileSize = 0;
+        {
+            ifstream sizeCheck(appointmentDataFileName, ios::binary | ios::ate);
+            if (sizeCheck.is_open()) {
+                appFileSize = static_cast<int>(sizeCheck.tellg());
+                sizeCheck.close();
+            }
+        }
+
         appointmentFile.Rewind();
         int offset = appointmentFile.GetHeaderSize();
+        int recordSize = appBuffer.GetBufferSize();
         Appointments app;
-        while (appointmentFile.Read(offset) != -1)
+        while (offset + recordSize <= appFileSize)
         {
-            app.Unpack(appBuffer);
-            if (app.ID[0] != '*')
+            if (appointmentFile.Read(offset) != -1)
             {
-                string id = TrimField(app.ID, sizeof(app.ID));
-                string docID = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+                app.Unpack(appBuffer);
+                if (app.ID[0] != '*')
+                {
+                    string id = TrimField(app.ID, sizeof(app.ID));
+                    string docID = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
 
-                appPrimaryIndex.Insert(id, offset);
-                appSecDocIDIndex.Insert(docID.c_str(), id.c_str());
+                    appPrimaryIndex.Insert(id, offset);
+                    appSecDocIDIndex.Insert(docID.c_str(), id.c_str());
+                }
             }
-            offset += appBuffer.GetBufferSize();
+            offset += recordSize;
         }
     }
 }
@@ -1135,34 +1167,48 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             {
                 if (doctorfile.Open(doctorDataFileName))
                 {
+                    // FIX: Same deleted-record / EOF ambiguity fix as RebuildIndexes.
+                    int docFileSize = 0;
+                    {
+                        ifstream sizeCheck(doctorDataFileName, ios::binary | ios::ate);
+                        if (sizeCheck.is_open()) {
+                            docFileSize = static_cast<int>(sizeCheck.tellg());
+                            sizeCheck.close();
+                        }
+                    }
+
                     doctorfile.Rewind();
                     int offset = doctorfile.GetHeaderSize();
+                    int recordSize = docBuffer.GetBufferSize();
                     Doctor doc;
-                    while (doctorfile.Read(offset) != -1)
+                    while (offset + recordSize <= docFileSize)
                     {
-                        doc.Unpack(docBuffer);
-                        if (doc.id[0] != '*')
+                        if (doctorfile.Read(offset) != -1)
                         {
-                            bool match = true;
-                            for (const auto &cond : instructions.where_statment)
+                            doc.Unpack(docBuffer);
+                            if (doc.id[0] != '*')
                             {
-                                Field f = get<0>(cond);
-                                Op op = get<1>(cond);
-                                string val = ExtractStringFromAny(get<2>(cond));
-                                string actual;
+                                bool match = true;
+                                for (const auto &cond : instructions.where_statment)
+                                {
+                                    Field f = get<0>(cond);
+                                    Op op = get<1>(cond);
+                                    string val = ExtractStringFromAny(get<2>(cond));
+                                    string actual;
 
-                                if (f == Field::DoctorID) actual = TrimField(doc.id, sizeof(doc.id));
-                                else if (f == Field::DoctorName) actual = TrimField(doc.name, sizeof(doc.name));
-                                else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
-                                else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
+                                    if (f == Field::DoctorID) actual = TrimField(doc.id, sizeof(doc.id));
+                                    else if (f == Field::DoctorName) actual = TrimField(doc.name, sizeof(doc.name));
+                                    else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
+                                    else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
 
-                                if (op == Op::Equals && actual != val) match = false;
-                                if (op == Op::NotEquals && actual == val) match = false;
+                                    if (op == Op::Equals && actual != val) match = false;
+                                    if (op == Op::NotEquals && actual == val) match = false;
+                                }
+                                if (match)
+                                    result.doctors.push_back(doc);
                             }
-                            if (match)
-                                result.doctors.push_back(doc);
                         }
-                        offset += docBuffer.GetBufferSize();
+                        offset += recordSize;
                     }
                 }
                 break;
@@ -1211,33 +1257,47 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             {
                 if (appointmentFile.Open(appointmentDataFileName))
                 {
+                    // FIX: Same deleted-record / EOF ambiguity fix as RebuildIndexes.
+                    int appFileSize = 0;
+                    {
+                        ifstream sizeCheck(appointmentDataFileName, ios::binary | ios::ate);
+                        if (sizeCheck.is_open()) {
+                            appFileSize = static_cast<int>(sizeCheck.tellg());
+                            sizeCheck.close();
+                        }
+                    }
+
                     appointmentFile.Rewind();
                     int offset = appointmentFile.GetHeaderSize();
+                    int recordSize = appBuffer.GetBufferSize();
                     Appointments app;
-                    while (appointmentFile.Read(offset) != -1)
+                    while (offset + recordSize <= appFileSize)
                     {
-                        app.Unpack(appBuffer);
-                        if (app.ID[0] != '*')
+                        if (appointmentFile.Read(offset) != -1)
                         {
-                            bool match = true;
-                            for (const auto &cond : instructions.where_statment)
+                            app.Unpack(appBuffer);
+                            if (app.ID[0] != '*')
                             {
-                                Field f = get<0>(cond);
-                                Op op = get<1>(cond);
-                                string val = ExtractStringFromAny(get<2>(cond));
-                                string actual;
+                                bool match = true;
+                                for (const auto &cond : instructions.where_statment)
+                                {
+                                    Field f = get<0>(cond);
+                                    Op op = get<1>(cond);
+                                    string val = ExtractStringFromAny(get<2>(cond));
+                                    string actual;
 
-                                if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
-                                else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
-                                else if (f == Field::DoctorID) actual = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+                                    if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
+                                    else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
+                                    else if (f == Field::DoctorID) actual = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
 
-                                if (op == Op::Equals && actual != val) match = false;
-                                if (op == Op::NotEquals && actual == val) match = false;
+                                    if (op == Op::Equals && actual != val) match = false;
+                                    if (op == Op::NotEquals && actual == val) match = false;
+                                }
+                                if (match)
+                                    result.appointments.push_back(app);
                             }
-                            if (match)
-                                result.appointments.push_back(app);
                         }
-                        offset += appBuffer.GetBufferSize();
+                        offset += recordSize;
                     }
                 }
                 break;
