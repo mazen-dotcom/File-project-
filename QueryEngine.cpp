@@ -78,12 +78,14 @@ namespace
     Table ParseTableName(const string &rawTable)
     {
         string s = ToLower(Trim(rawTable));
+        if (s == "both")
+            return Table::Both;
+        if (s.find("doctor") != string::npos && s.find("appointment") != string::npos)
+            return Table::Both;
         if (s == "doctors" || s == "doctor")
             return Table::Doctors;
         if (s == "appointments" || s == "appointment")
             return Table::Appointments;
-        if (s == "both")
-            return Table::Both;
         return Table::Doctors;
     }
 
@@ -210,6 +212,57 @@ void QueryResult::Print(ostream &os) const
         os << separator << "\n";
         os << "Total: " << appointments.size() << " record(s) found.\n";
     }
+    else if (table == Table::Both)
+    {
+        size_t count = !joinedRecords.empty() ? joinedRecords.size() : min(doctors.size(), appointments.size());
+        if (count == 0)
+        {
+            os << "No matching joined records found.\n";
+            return;
+        }
+
+        bool showAll = (selectedFields.find(Field::All) != selectedFields.end());
+        bool showDocID = showAll || (selectedFields.find(Field::DoctorID) != selectedFields.end());
+        bool showName = showAll || (selectedFields.find(Field::DoctorName) != selectedFields.end());
+        bool showSpec = showAll || (selectedFields.find(Field::DoctorSpecialty) != selectedFields.end());
+        bool showAddr = showAll || (selectedFields.find(Field::Address) != selectedFields.end());
+        bool showAppID = showAll || (selectedFields.find(Field::AppointmentID) != selectedFields.end());
+        bool showDate = showAll || (selectedFields.find(Field::AppointmentDate) != selectedFields.end());
+
+        string separator = "+";
+        if (showDocID) separator += string(17, '-') + "+";
+        if (showName) separator += string(32, '-') + "+";
+        if (showSpec) separator += string(22, '-') + "+";
+        if (showAddr) separator += string(32, '-') + "+";
+        if (showAppID) separator += string(17, '-') + "+";
+        if (showDate) separator += string(32, '-') + "+";
+
+        os << separator << "\n|";
+        if (showDocID) os << " " << left << setw(15) << "Doctor ID" << " |";
+        if (showName) os << " " << left << setw(30) << "Doctor Name" << " |";
+        if (showSpec) os << " " << left << setw(20) << "Doctor Specialty" << " |";
+        if (showAddr) os << " " << left << setw(30) << "Address" << " |";
+        if (showAppID) os << " " << left << setw(15) << "Appointment ID" << " |";
+        if (showDate) os << " " << left << setw(30) << "Appointment Date" << " |";
+        os << "\n" << separator << "\n";
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const Doctor &doc = !joinedRecords.empty() ? joinedRecords[i].first : doctors[i];
+            const Appointments &app = !joinedRecords.empty() ? joinedRecords[i].second : appointments[i];
+
+            os << "|";
+            if (showDocID) os << " " << left << setw(15) << QueryEngine::TrimField(doc.id, sizeof(doc.id)) << " |";
+            if (showName) os << " " << left << setw(30) << QueryEngine::TrimField(doc.name, sizeof(doc.name)) << " |";
+            if (showSpec) os << " " << left << setw(20) << QueryEngine::TrimField(doc.specialty, sizeof(doc.specialty)) << " |";
+            if (showAddr) os << " " << left << setw(30) << QueryEngine::TrimField(doc.address, sizeof(doc.address)) << " |";
+            if (showAppID) os << " " << left << setw(15) << QueryEngine::TrimField(app.ID, sizeof(app.ID)) << " |";
+            if (showDate) os << " " << left << setw(30) << QueryEngine::TrimField(app.Date, sizeof(app.Date)) << " |";
+            os << "\n";
+        }
+        os << separator << "\n";
+        os << "Total: " << count << " joined record(s) found.\n";
+    }
 }
 
 // ============================================================================
@@ -243,6 +296,157 @@ string QueryEngine::TrimField(const char *data, size_t maxLen)
     while (len > 0 && (data[len - 1] == ' ' || data[len - 1] == '\0'))
         len--;
     return string(data, len);
+}
+
+bool QueryEngine::EvaluateOp(const string &actual, Op op, const string &val)
+{
+    switch (op)
+    {
+        case Op::Equals:
+            return actual == val;
+        case Op::NotEquals:
+            return actual != val;
+        case Op::LessThan:
+            return actual < val;
+        case Op::GreaterThan:
+            return actual > val;
+        case Op::LessOrEqual:
+            return actual <= val;
+        case Op::GreaterOrEqual:
+            return actual >= val;
+        case Op::Contains:
+            return actual.find(val) != string::npos;
+        case Op::StartsWith:
+            return actual.rfind(val, 0) == 0;
+        case Op::EndsWith:
+            return actual.size() >= val.size() &&
+                   actual.compare(actual.size() - val.size(), val.size(), val) == 0;
+        default:
+            return actual == val;
+    }
+}
+
+namespace
+{
+    bool EvaluateConditionsList(const vector<pair<bool, LogicOp>> &evaluated)
+    {
+        if (evaluated.empty())
+            return true;
+
+        bool overall = false;
+        bool currentTerm = true;
+
+        for (size_t i = 0; i < evaluated.size(); ++i)
+        {
+            bool match = evaluated[i].first;
+            LogicOp op = evaluated[i].second;
+
+            if (i == 0)
+            {
+                currentTerm = match;
+            }
+            else if (op == LogicOp::Or)
+            {
+                overall = overall || currentTerm;
+                currentTerm = match;
+            }
+            else
+            {
+                currentTerm = currentTerm && match;
+            }
+        }
+
+        overall = overall || currentTerm;
+        return overall;
+    }
+}
+
+bool QueryEngine::MatchesDoctor(const Doctor &doc, const Instructions &inst)
+{
+    if (inst.where_statment.empty())
+        return true;
+
+    const auto &conds = inst.where_statment;
+    vector<pair<bool, LogicOp>> evaluated;
+    evaluated.reserve(conds.size());
+
+    for (const auto &cond : conds)
+    {
+        Field f = get<0>(cond);
+        Op op = get<1>(cond);
+        string val = ExtractStringFromAny(get<2>(cond));
+        LogicOp logic = get<3>(cond);
+
+        string actual;
+        if (f == Field::DoctorID) actual = TrimField(doc.id, sizeof(doc.id));
+        else if (f == Field::DoctorName) actual = TrimField(doc.name, sizeof(doc.name));
+        else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
+        else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
+
+        bool match = EvaluateOp(actual, op, val);
+        evaluated.emplace_back(match, logic);
+    }
+
+    return EvaluateConditionsList(evaluated);
+}
+
+bool QueryEngine::MatchesAppointment(const Appointments &app, const Instructions &inst)
+{
+    if (inst.where_statment.empty())
+        return true;
+
+    const auto &conds = inst.where_statment;
+    vector<pair<bool, LogicOp>> evaluated;
+    evaluated.reserve(conds.size());
+
+    for (const auto &cond : conds)
+    {
+        Field f = get<0>(cond);
+        Op op = get<1>(cond);
+        string val = ExtractStringFromAny(get<2>(cond));
+        LogicOp logic = get<3>(cond);
+
+        string actual;
+        if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
+        else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
+        else if (f == Field::DoctorID) actual = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+
+        bool match = EvaluateOp(actual, op, val);
+        evaluated.emplace_back(match, logic);
+    }
+
+    return EvaluateConditionsList(evaluated);
+}
+
+bool QueryEngine::MatchesJoined(const Doctor &doc, const Appointments &app, const Instructions &inst)
+{
+    if (inst.where_statment.empty())
+        return true;
+
+    const auto &conds = inst.where_statment;
+    vector<pair<bool, LogicOp>> evaluated;
+    evaluated.reserve(conds.size());
+
+    for (const auto &cond : conds)
+    {
+        Field f = get<0>(cond);
+        Op op = get<1>(cond);
+        string val = ExtractStringFromAny(get<2>(cond));
+        LogicOp logic = get<3>(cond);
+
+        string actual;
+        if (f == Field::DoctorID) actual = TrimField(doc.id, sizeof(doc.id));
+        else if (f == Field::DoctorName) actual = TrimField(doc.name, sizeof(doc.name));
+        else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
+        else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
+        else if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
+        else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
+
+        bool match = EvaluateOp(actual, op, val);
+        evaluated.emplace_back(match, logic);
+    }
+
+    return EvaluateConditionsList(evaluated);
 }
 
 // ============================================================================
@@ -887,13 +1091,19 @@ QueryEngine& QueryEngine::From(Table table)
 
 QueryEngine& QueryEngine::Where(Field field, Op op, const std::any &val, LogicOp logicOp)
 {
-    currentInstructions.where_statment.insert(make_tuple(field, op, val, logicOp));
+    currentInstructions.where_statment.push_back(make_tuple(field, op, val, logicOp));
+    return *this;
+}
+
+QueryEngine& QueryEngine::Where(const vector<tuple<Field, Op, std::any, LogicOp>> &conditions)
+{
+    currentInstructions.where_statment.insert(currentInstructions.where_statment.end(), conditions.begin(), conditions.end());
     return *this;
 }
 
 QueryEngine& QueryEngine::Where(const set<tuple<Field, Op, std::any, LogicOp>> &conditions)
 {
-    currentInstructions.where_statment.insert(conditions.begin(), conditions.end());
+    currentInstructions.where_statment.insert(currentInstructions.where_statment.end(), conditions.begin(), conditions.end());
     return *this;
 }
 
@@ -929,12 +1139,19 @@ SearchStrategy QueryEngine::DetermineStrategy(const Instructions &instructions)
     if (wheres.empty())
         return SearchStrategy::LinearSearch;
 
+    bool hasOr = false;
+    for (const auto &cond : wheres)
+    {
+        if (get<3>(cond) == LogicOp::Or)
+            hasOr = true;
+    }
+
     if (instructions.from_statment == Table::Doctors)
     {
-        // Check for multiple secondary indices (Name + Specialty)
         bool hasNameEquals = false;
         bool hasSpecEquals = false;
         bool hasIDEquals = false;
+        int otherCount = 0;
 
         for (const auto &cond : wheres)
         {
@@ -943,22 +1160,44 @@ SearchStrategy QueryEngine::DetermineStrategy(const Instructions &instructions)
             if (op == Op::Equals)
             {
                 if (f == Field::DoctorID) hasIDEquals = true;
-                if (f == Field::DoctorName) hasNameEquals = true;
-                if (f == Field::DoctorSpecialty) hasSpecEquals = true;
+                else if (f == Field::DoctorName) hasNameEquals = true;
+                else if (f == Field::DoctorSpecialty) hasSpecEquals = true;
+                else otherCount++;
+            }
+            else
+            {
+                otherCount++;
             }
         }
 
-        if (hasIDEquals)
-            return SearchStrategy::PrimaryIndex;
-        if (hasNameEquals && hasSpecEquals)
+        if (!hasOr)
+        {
+            if (hasIDEquals)
+                return SearchStrategy::PrimaryIndex;
+            if (hasNameEquals && hasSpecEquals)
+                return SearchStrategy::MultipleSecondaryIndices;
+            if (hasNameEquals || hasSpecEquals)
+                return SearchStrategy::SecondaryIndex;
+            return SearchStrategy::LinearSearch;
+        }
+
+        // If there IS OR logic:
+        if (hasNameEquals && hasSpecEquals && !hasIDEquals && otherCount == 0)
             return SearchStrategy::MultipleSecondaryIndices;
-        if (hasNameEquals || hasSpecEquals)
+        if (hasNameEquals && !hasSpecEquals && !hasIDEquals && otherCount == 0)
             return SearchStrategy::SecondaryIndex;
+        if (hasSpecEquals && !hasNameEquals && !hasIDEquals && otherCount == 0)
+            return SearchStrategy::SecondaryIndex;
+        if ((hasNameEquals || hasSpecEquals) && !hasIDEquals && otherCount == 0)
+            return SearchStrategy::MultipleSecondaryIndices;
+
+        return SearchStrategy::LinearSearch;
     }
     else if (instructions.from_statment == Table::Appointments)
     {
         bool hasAppIDEquals = false;
         bool hasDocIDEquals = false;
+        int otherCount = 0;
 
         for (const auto &cond : wheres)
         {
@@ -967,14 +1206,53 @@ SearchStrategy QueryEngine::DetermineStrategy(const Instructions &instructions)
             if (op == Op::Equals)
             {
                 if (f == Field::AppointmentID) hasAppIDEquals = true;
-                if (f == Field::DoctorID) hasDocIDEquals = true;
+                else if (f == Field::DoctorID) hasDocIDEquals = true;
+                else otherCount++;
+            }
+            else
+            {
+                otherCount++;
             }
         }
 
-        if (hasAppIDEquals)
-            return SearchStrategy::PrimaryIndex;
-        if (hasDocIDEquals)
+        if (!hasOr)
+        {
+            if (hasAppIDEquals)
+                return SearchStrategy::PrimaryIndex;
+            if (hasDocIDEquals)
+                return SearchStrategy::SecondaryIndex;
+            return SearchStrategy::LinearSearch;
+        }
+
+        if (hasDocIDEquals && !hasAppIDEquals && otherCount == 0)
             return SearchStrategy::SecondaryIndex;
+
+        return SearchStrategy::LinearSearch;
+    }
+    else if (instructions.from_statment == Table::Both)
+    {
+        bool hasDocIDEquals = false;
+        bool hasNameEquals = false;
+        bool hasAppIDEquals = false;
+        for (const auto &cond : wheres)
+        {
+            Field f = get<0>(cond);
+            Op op = get<1>(cond);
+            if (op == Op::Equals)
+            {
+                if (f == Field::DoctorID) hasDocIDEquals = true;
+                if (f == Field::DoctorName) hasNameEquals = true;
+                if (f == Field::AppointmentID) hasAppIDEquals = true;
+            }
+        }
+        if (!hasOr)
+        {
+            if (hasDocIDEquals || hasAppIDEquals)
+                return SearchStrategy::PrimaryIndex;
+            if (hasNameEquals)
+                return SearchStrategy::SecondaryIndex;
+        }
+        return SearchStrategy::LinearSearch;
     }
 
     return SearchStrategy::LinearSearch;
@@ -1097,7 +1375,7 @@ Instructions QueryEngine::Parse(const string &queryString)
 
                 Field f = ParseFieldName(rawField);
                 Op op = ParseOp(opStr);
-                inst.where_statment.insert(make_tuple(f, op, rawVal, prevLogic));
+                inst.where_statment.push_back(make_tuple(f, op, rawVal, prevLogic));
             }
 
             prevLogic = nextLogic;
@@ -1162,44 +1440,119 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                 Doctor doc;
                 if (SearchDoctorByID(doctorID, doc))
                 {
-                    result.doctors.push_back(doc);
+                    if (MatchesDoctor(doc, instructions))
+                    {
+                        result.doctors.push_back(doc);
+                    }
                 }
                 break;
             }
             case SearchStrategy::SecondaryIndex:
             {
-                string name, spec;
+                vector<string> names;
+                vector<string> specs;
                 for (const auto &cond : instructions.where_statment)
                 {
                     if (get<0>(cond) == Field::DoctorName && get<1>(cond) == Op::Equals)
-                        name = ExtractStringFromAny(get<2>(cond));
+                        names.push_back(ExtractStringFromAny(get<2>(cond)));
                     if (get<0>(cond) == Field::DoctorSpecialty && get<1>(cond) == Op::Equals)
-                        spec = ExtractStringFromAny(get<2>(cond));
+                        specs.push_back(ExtractStringFromAny(get<2>(cond)));
                 }
-                if (!name.empty())
-                    result.doctors = SearchDoctorsByName(name);
-                else if (!spec.empty())
-                    result.doctors = SearchDoctorsBySpecialty(spec);
+
+                set<int> candidateOffsets;
+                for (const auto &n : names)
+                {
+                    vector<int> offs = docSecNameIndex.Search(n.c_str(), docPrimaryIndex);
+                    candidateOffsets.insert(offs.begin(), offs.end());
+                }
+                for (const auto &s : specs)
+                {
+                    vector<int> offs = docSecSpecIndex.Search(s.c_str(), docPrimaryIndex);
+                    candidateOffsets.insert(offs.begin(), offs.end());
+                }
+
+                if (candidateOffsets.empty())
+                    break;
+
+                if (doctorfile.Open(doctorDataFileName))
+                {
+                    for (int offset : candidateOffsets)
+                    {
+                        if (doctorfile.Read(offset) != -1)
+                        {
+                            Doctor doc;
+                            doc.Unpack(docBuffer);
+                            if (doc.id[0] != '*' && MatchesDoctor(doc, instructions))
+                            {
+                                result.doctors.push_back(doc);
+                            }
+                        }
+                    }
+                }
                 break;
             }
             case SearchStrategy::MultipleSecondaryIndices:
             {
-                string name, spec;
-                // FIX: Detect OR logic among the conditions
+                vector<string> names;
+                vector<string> specs;
                 bool hasOrLogic = false;
+
                 for (const auto &cond : instructions.where_statment)
                 {
                     if (get<0>(cond) == Field::DoctorName && get<1>(cond) == Op::Equals)
-                        name = ExtractStringFromAny(get<2>(cond));
+                        names.push_back(ExtractStringFromAny(get<2>(cond)));
                     if (get<0>(cond) == Field::DoctorSpecialty && get<1>(cond) == Op::Equals)
-                        spec = ExtractStringFromAny(get<2>(cond));
+                        specs.push_back(ExtractStringFromAny(get<2>(cond)));
                     if (get<3>(cond) == LogicOp::Or)
                         hasOrLogic = true;
                 }
+
+                set<int> nameOffsets;
+                for (const auto &n : names)
+                {
+                    vector<int> offs = docSecNameIndex.Search(n.c_str(), docPrimaryIndex);
+                    nameOffsets.insert(offs.begin(), offs.end());
+                }
+
+                set<int> specOffsets;
+                for (const auto &s : specs)
+                {
+                    vector<int> offs = docSecSpecIndex.Search(s.c_str(), docPrimaryIndex);
+                    specOffsets.insert(offs.begin(), offs.end());
+                }
+
+                vector<int> finalOffsets;
                 if (hasOrLogic)
-                    result.doctors = SearchDoctorsByNameOrSpecialty(name, spec);
+                {
+                    set_union(nameOffsets.begin(), nameOffsets.end(),
+                              specOffsets.begin(), specOffsets.end(),
+                              back_inserter(finalOffsets));
+                }
                 else
-                    result.doctors = SearchDoctorsByNameAndSpecialty(name, spec);
+                {
+                    set_intersection(nameOffsets.begin(), nameOffsets.end(),
+                                     specOffsets.begin(), specOffsets.end(),
+                                     back_inserter(finalOffsets));
+                }
+
+                if (finalOffsets.empty())
+                    break;
+
+                if (doctorfile.Open(doctorDataFileName))
+                {
+                    for (int offset : finalOffsets)
+                    {
+                        if (doctorfile.Read(offset) != -1)
+                        {
+                            Doctor doc;
+                            doc.Unpack(docBuffer);
+                            if (doc.id[0] != '*' && MatchesDoctor(doc, instructions))
+                            {
+                                result.doctors.push_back(doc);
+                            }
+                        }
+                    }
+                }
                 break;
             }
             case SearchStrategy::LinearSearch:
@@ -1207,7 +1560,6 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             {
                 if (doctorfile.Open(doctorDataFileName))
                 {
-                    // FIX: Same deleted-record / EOF ambiguity fix as RebuildIndexes.
                     int docFileSize = 0;
                     {
                         ifstream sizeCheck(doctorDataFileName, ios::binary | ios::ate);
@@ -1226,43 +1578,9 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                         if (doctorfile.Read(offset) != -1)
                         {
                             doc.Unpack(docBuffer);
-                            if (doc.id[0] != '*')
+                            if (doc.id[0] != '*' && MatchesDoctor(doc, instructions))
                             {
-                                // FIX: Determine if conditions use OR logic
-                                bool hasOrLogic = false;
-                                for (const auto &cond : instructions.where_statment)
-                                {
-                                    if (get<3>(cond) == LogicOp::Or)
-                                    {
-                                        hasOrLogic = true;
-                                        break;
-                                    }
-                                }
-
-                                bool match = !hasOrLogic; // AND: start true; OR: start false
-                                for (const auto &cond : instructions.where_statment)
-                                {
-                                    Field f = get<0>(cond);
-                                    Op op = get<1>(cond);
-                                    string val = ExtractStringFromAny(get<2>(cond));
-                                    string actual;
-
-                                    if (f == Field::DoctorID) actual = TrimField(doc.id, sizeof(doc.id));
-                                    else if (f == Field::DoctorName) actual = TrimField(doc.name, sizeof(doc.name));
-                                    else if (f == Field::DoctorSpecialty) actual = TrimField(doc.specialty, sizeof(doc.specialty));
-                                    else if (f == Field::Address) actual = TrimField(doc.address, sizeof(doc.address));
-
-                                    bool condMatch = true;
-                                    if (op == Op::Equals && actual != val) condMatch = false;
-                                    if (op == Op::NotEquals && actual == val) condMatch = false;
-
-                                    if (hasOrLogic)
-                                        match = match || condMatch; // OR: any condition makes it true
-                                    else if (!condMatch)
-                                        match = false;              // AND: any mismatch makes it false
-                                }
-                                if (match)
-                                    result.doctors.push_back(doc);
+                                result.doctors.push_back(doc);
                             }
                         }
                         offset += recordSize;
@@ -1290,23 +1608,47 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                 Appointments app;
                 if (SearchAppointmentByID(appID, app))
                 {
-                    result.appointments.push_back(app);
+                    if (MatchesAppointment(app, instructions))
+                    {
+                        result.appointments.push_back(app);
+                    }
                 }
                 break;
             }
             case SearchStrategy::SecondaryIndex:
             {
-                string docID;
+                vector<string> docIDs;
                 for (const auto &cond : instructions.where_statment)
                 {
                     if (get<0>(cond) == Field::DoctorID && get<1>(cond) == Op::Equals)
+                        docIDs.push_back(ExtractStringFromAny(get<2>(cond)));
+                }
+
+                set<int> candidateOffsets;
+                for (const auto &dId : docIDs)
+                {
+                    vector<int> offs = appSecDocIDIndex.Search(dId.c_str(), appPrimaryIndex);
+                    candidateOffsets.insert(offs.begin(), offs.end());
+                }
+
+                if (candidateOffsets.empty())
+                    break;
+
+                if (appointmentFile.Open(appointmentDataFileName))
+                {
+                    for (int offset : candidateOffsets)
                     {
-                        docID = ExtractStringFromAny(get<2>(cond));
-                        break;
+                        if (appointmentFile.Read(offset) != -1)
+                        {
+                            Appointments app;
+                            app.Unpack(appBuffer);
+                            if (app.ID[0] != '*' && MatchesAppointment(app, instructions))
+                            {
+                                result.appointments.push_back(app);
+                            }
+                        }
                     }
                 }
-                if (!docID.empty())
-                    result.appointments = SearchAppointmentsByDoctorID(docID);
                 break;
             }
             case SearchStrategy::LinearSearch:
@@ -1314,7 +1656,6 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             {
                 if (appointmentFile.Open(appointmentDataFileName))
                 {
-                    // FIX: Same deleted-record / EOF ambiguity fix as RebuildIndexes.
                     int appFileSize = 0;
                     {
                         ifstream sizeCheck(appointmentDataFileName, ios::binary | ios::ate);
@@ -1333,48 +1674,167 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                         if (appointmentFile.Read(offset) != -1)
                         {
                             app.Unpack(appBuffer);
-                            if (app.ID[0] != '*')
+                            if (app.ID[0] != '*' && MatchesAppointment(app, instructions))
                             {
-                                // FIX: Determine if conditions use OR logic
-                                bool hasOrLogic = false;
-                                for (const auto &cond : instructions.where_statment)
-                                {
-                                    if (get<3>(cond) == LogicOp::Or)
-                                    {
-                                        hasOrLogic = true;
-                                        break;
-                                    }
-                                }
-
-                                bool match = !hasOrLogic; // AND: start true; OR: start false
-                                for (const auto &cond : instructions.where_statment)
-                                {
-                                    Field f = get<0>(cond);
-                                    Op op = get<1>(cond);
-                                    string val = ExtractStringFromAny(get<2>(cond));
-                                    string actual;
-
-                                    if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
-                                    else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
-                                    else if (f == Field::DoctorID) actual = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
-
-                                    bool condMatch = true;
-                                    if (op == Op::Equals && actual != val) condMatch = false;
-                                    if (op == Op::NotEquals && actual == val) condMatch = false;
-
-                                    if (hasOrLogic)
-                                        match = match || condMatch;
-                                    else if (!condMatch)
-                                        match = false;
-                                }
-                                if (match)
-                                    result.appointments.push_back(app);
+                                result.appointments.push_back(app);
                             }
                         }
                         offset += recordSize;
                     }
                 }
                 break;
+            }
+        }
+    }
+    else if (result.table == Table::Both)
+    {
+        // Join Doctors and Appointments on doctor.id == appointment.doctor_ID
+        if (doctorfile.Open(doctorDataFileName) && appointmentFile.Open(appointmentDataFileName))
+        {
+            if (result.strategy == SearchStrategy::PrimaryIndex)
+            {
+                string docID;
+                for (const auto &cond : instructions.where_statment)
+                {
+                    if (get<0>(cond) == Field::DoctorID && get<1>(cond) == Op::Equals)
+                    {
+                        docID = ExtractStringFromAny(get<2>(cond));
+                        break;
+                    }
+                }
+
+                if (!docID.empty())
+                {
+                    Doctor doc;
+                    if (SearchDoctorByID(docID, doc))
+                    {
+                        vector<int> appOffsets = appSecDocIDIndex.Search(docID.c_str(), appPrimaryIndex);
+                        for (int aOffset : appOffsets)
+                        {
+                            if (appointmentFile.Read(aOffset) != -1)
+                            {
+                                Appointments app;
+                                app.Unpack(appBuffer);
+                                if (app.ID[0] != '*' && MatchesJoined(doc, app, instructions))
+                                {
+                                    result.doctors.push_back(doc);
+                                    result.appointments.push_back(app);
+                                    result.joinedRecords.push_back({doc, app});
+                                }
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    string appID;
+                    for (const auto &cond : instructions.where_statment)
+                    {
+                        if (get<0>(cond) == Field::AppointmentID && get<1>(cond) == Op::Equals)
+                        {
+                            appID = ExtractStringFromAny(get<2>(cond));
+                            break;
+                        }
+                    }
+                    Appointments app;
+                    if (SearchAppointmentByID(appID, app))
+                    {
+                        string dId = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+                        Doctor doc;
+                        if (SearchDoctorByID(dId, doc))
+                        {
+                            if (MatchesJoined(doc, app, instructions))
+                            {
+                                result.doctors.push_back(doc);
+                                result.appointments.push_back(app);
+                                result.joinedRecords.push_back({doc, app});
+                            }
+                        }
+                    }
+                }
+            }
+            else if (result.strategy == SearchStrategy::SecondaryIndex)
+            {
+                vector<string> names;
+                for (const auto &cond : instructions.where_statment)
+                {
+                    if (get<0>(cond) == Field::DoctorName && get<1>(cond) == Op::Equals)
+                        names.push_back(ExtractStringFromAny(get<2>(cond)));
+                }
+
+                set<int> docOffsets;
+                for (const auto &n : names)
+                {
+                    vector<int> offs = docSecNameIndex.Search(n.c_str(), docPrimaryIndex);
+                    docOffsets.insert(offs.begin(), offs.end());
+                }
+
+                for (int dOffset : docOffsets)
+                {
+                    if (doctorfile.Read(dOffset) != -1)
+                    {
+                        Doctor doc;
+                        doc.Unpack(docBuffer);
+                        if (doc.id[0] != '*')
+                        {
+                            string dId = TrimField(doc.id, sizeof(doc.id));
+                            vector<int> appOffsets = appSecDocIDIndex.Search(dId.c_str(), appPrimaryIndex);
+                            for (int aOffset : appOffsets)
+                            {
+                                if (appointmentFile.Read(aOffset) != -1)
+                                {
+                                    Appointments app;
+                                    app.Unpack(appBuffer);
+                                    if (app.ID[0] != '*' && MatchesJoined(doc, app, instructions))
+                                    {
+                                        result.doctors.push_back(doc);
+                                        result.appointments.push_back(app);
+                                        result.joinedRecords.push_back({doc, app});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else // LinearSearch / Index-Nested Loop Join
+            {
+                int appFileSize = 0;
+                {
+                    ifstream sizeCheck(appointmentDataFileName, ios::binary | ios::ate);
+                    if (sizeCheck.is_open()) {
+                        appFileSize = static_cast<int>(sizeCheck.tellg());
+                        sizeCheck.close();
+                    }
+                }
+
+                appointmentFile.Rewind();
+                int offset = appointmentFile.GetHeaderSize();
+                int recordSize = appBuffer.GetBufferSize();
+                Appointments app;
+
+                while (offset + recordSize <= appFileSize)
+                {
+                    if (appointmentFile.Read(offset) != -1)
+                    {
+                        app.Unpack(appBuffer);
+                        if (app.ID[0] != '*')
+                        {
+                            string dId = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+                            Doctor doc;
+                            if (SearchDoctorByID(dId, doc))
+                            {
+                                if (MatchesJoined(doc, app, instructions))
+                                {
+                                    result.doctors.push_back(doc);
+                                    result.appointments.push_back(app);
+                                    result.joinedRecords.push_back({doc, app});
+                                }
+                            }
+                        }
+                    }
+                    offset += recordSize;
+                }
             }
         }
     }
