@@ -1,50 +1,35 @@
+// ============================================================================
+//  IS321 - Assignment 1 : Healthcare Management System
+//  main.cpp  -  Welcome screen + Add / Update / Delete / Print / Query
+//
+//  Build (all .cpp files of the project together, C++17):
+//    g++ -std=c++17 -o healthcare main.cpp QueryEngine.cpp Appointment.cpp
+//        BufferFile.cpp Doctor.cpp FixedFieldBuffer.cpp PrimaryIndex.cpp SecondaryIndex.cpp
+//  (one command line - the second line above just continues the first)
+//
+//  Design: ONE QueryEngine object owns the data files (RecordFile / BufferFile with the
+//  AVAIL LIST header), the primary indexes and the secondary indexes. Every menu option
+//  goes through it, so the query engine and the menu always see the same in-memory indexes.
+// ============================================================================
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <vector>
 #include <cstring>
-#include <algorithm>
 #include <filesystem>
-#include "indexes.h"
+#include "QueryEngine.h"
 using namespace std;
 
-static_assert(sizeof(Doctor) == 95,       "Doctor record must be exactly 95 bytes");
-static_assert(sizeof(Appointments) == 60, "Appointments record must be exactly 60 bytes");
+const string DOC_DAT = "data/doctors.dat";
+const string APP_DAT = "data/appointments.dat";
 
-// ----------------------------------------------------------------------------
-//  File names (same layout as the architecture document)
-// ----------------------------------------------------------------------------
-const string DOC_DAT           = "data/doctors.dat";
-const string APP_DAT           = "data/appointments.dat";
-const string DOC_PRI           = "indexes/doctor_primary.ind";
-const string APP_PRI           = "indexes/app_primary.ind";
-const string APP_SEC_DOC       = "indexes/app_sec_docID.ind";
-const string APP_SEC_DOC_LIST  = "indexes/app_sec_docID_list.dat";
-const string DOC_SEC_NAME      = "indexes/doc_sec_name.ind";
-const string DOC_SEC_NAME_LIST = "indexes/doc_sec_name_list.dat";
-const string DOC_SEC_SPEC      = "indexes/doc_sec_spec.ind";
-const string DOC_SEC_SPEC_LIST = "indexes/doc_sec_spec_list.dat";
-
-// Field sizes (from the assignment)
-const size_t ID_LEN = 15, DNAME_LEN = 30, SPEC_LEN = 20, ADDR_LEN = 30, DATE_LEN = 30;
+const size_t ID_LEN = sizeof(Doctor::id), DNAME_LEN = sizeof(Doctor::name),
+             SPEC_LEN = sizeof(Doctor::specialty), ADDR_LEN = sizeof(Doctor::address),
+             DATE_LEN = sizeof(Appointments::Date);
 
 // ============================================================================
-//  1. FIELD + INPUT HELPERS
+//  1. INPUT HELPERS
 // ============================================================================
-bool inputClosed = false;   // set when stdin hits EOF so the menu loop can stop
-
-// Copy s into a fixed-size char field, padded with spaces (truncates if too long)
-void setField(char* dest, size_t size, const string& s) {
-    memset(dest, ' ', size);
-    memcpy(dest, s.data(), min(size, s.size()));
-}
-
-// Fixed-size char field -> std::string without the trailing padding
-string getField(const char* src, size_t size) {
-    string s(src, size);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\0')) s.pop_back();
-    return s;
-}
+bool inputClosed = false;   // stdin reached EOF -> stop the menu loop
 
 string trim(const string& s) {
     size_t a = s.find_first_not_of(" \t\r\n");
@@ -65,9 +50,8 @@ bool askYesNo(const string& question) {
     return !a.empty() && (a[0] == 'y' || a[0] == 'Y');
 }
 
-// Prompt for a field and validate it.  Returns false (after printing why) if invalid.
-//   required : empty not allowed
-//   isKey    : key fields may not start with '*' (that is the "deleted" marker)
+// Prompt for one field and validate it (the engine would silently truncate).
+//   required: may not be empty      isKey: may not start with '*' (the deleted marker)
 bool askField(const string& label, size_t maxLen, string& out,
               bool required = true, bool isKey = false) {
     out = readLine(label + ": ");
@@ -88,421 +72,196 @@ bool askField(const string& label, size_t maxLen, string& out,
     return true;
 }
 
-// ============================================================================
-//  2. DATA-FILE LAYER  (header record, AVAIL LIST, read / write at offset)
-// ============================================================================
-
-// Creates the file with header = -1 if it does not exist. Returns true if created.
-bool initDataFile(const string& path) {
-    ifstream test(path, ios::binary);
-    if (test) return false;
-    ofstream f(path, ios::binary);
-    int h = -1;
-    f.write(reinterpret_cast<const char*>(&h), sizeof(int));
-    return true;
+void setField(char* dest, size_t size, const string& s) {
+    memset(dest, ' ', size);
+    memcpy(dest, s.data(), min(size, s.size()));
 }
 
-int readHeader(const string& path) {
-    ifstream f(path, ios::binary);
-    int h = -1;
-    if (f) f.read(reinterpret_cast<char*>(&h), sizeof(int));
-    return h;
-}
-
-void writeHeader(const string& path, int head) {
-    fstream f(path, ios::in | ios::out | ios::binary);
-    f.seekp(0, ios::beg);
-    f.write(reinterpret_cast<const char*>(&head), sizeof(int));
-}
-
-template <typename T>
-bool readRecordAt(const string& path, int offset, T& rec) {
-    ifstream f(path, ios::binary);
-    if (!f) return false;
-    f.seekg(offset, ios::beg);
-    f.read(reinterpret_cast<char*>(&rec), sizeof(T));
-    return !f.fail();
-}
-
-template <typename T>
-bool writeRecordAt(const string& path, int offset, const T& rec) {
-    fstream f(path, ios::in | ios::out | ios::binary);
-    if (!f) return false;
-    f.seekp(offset, ios::beg);
-    f.write(reinterpret_cast<const char*>(&rec), sizeof(T));
-    return !f.fail();
-}
-
-// ADD: use the first slot of the AVAIL LIST if there is one, otherwise append.
-// Returns the byte offset the record was written at (-1 on failure).
-template <typename T>
-int insertRecord(const string& path, const T& rec, bool& reusedSlot) {
-    reusedSlot = false;
-    int head = readHeader(path);
-
-    if (head != -1) {
-        T slot;
-        if (readRecordAt(path, head, slot) && reinterpret_cast<char*>(&slot)[0] == '*') {
-            int next;
-            memcpy(&next, reinterpret_cast<char*>(&slot) + 1, sizeof(int));   // next free slot
-            if (!writeRecordAt(path, head, rec)) return -1;
-            writeHeader(path, next);          // AVAIL LIST now starts at the next free slot
-            reusedSlot = true;
-            return head;
-        }
-        cout << "  ! Warning: AVAIL LIST head points to a non-deleted slot. Appending instead.\n";
-    }
-
-    fstream f(path, ios::in | ios::out | ios::binary);
-    if (!f) return -1;
-    f.seekp(0, ios::end);
-    int offset = static_cast<int>(f.tellp());
-    f.write(reinterpret_cast<const char*>(&rec), sizeof(T));
-    return f.fail() ? -1 : offset;
-}
-
-// DELETE: logical delete. '*' goes in byte 0 of the key, the old AVAIL head goes in
-// bytes 1..4, and the header now points at this slot (push onto the AVAIL LIST).
-template <typename T>
-bool markDeleted(const string& path, int offset) {
-    T rec;
-    if (!readRecordAt(path, offset, rec)) return false;
-    int oldHead = readHeader(path);
-    char* raw = reinterpret_cast<char*>(&rec);
-    raw[0] = '*';
-    memcpy(raw + 1, &oldHead, sizeof(int));
-    if (!writeRecordAt(path, offset, rec)) return false;
-    writeHeader(path, offset);
-    return true;
+void printAvail(const RecordFile& f) {
+    cout << "  (AVAIL LIST head in the file header is now " << f.GetAvailHead() << ")\n";
 }
 
 // ============================================================================
-//  3. INDEX MAINTENANCE  (uses the teammate's builders)
-// ============================================================================
-void rebuildDoctorPrimary()          { primaryindex_doctor_id_doctors(DOC_DAT, DOC_PRI); }
-void rebuildDoctorSecondary()        {
-    secondaryindex_doctorname_doctors(DOC_DAT, DOC_SEC_NAME, DOC_SEC_NAME_LIST);
-    secondaryindex_doctorspecality_doctors(DOC_DAT, DOC_SEC_SPEC, DOC_SEC_SPEC_LIST);
-}
-void rebuildAppointmentPrimary()     { primaryindex_appointemtid_appoinment(APP_DAT, APP_PRI); }
-void rebuildAppointmentSecondary()   { secondaryindex_doctorid_appointments(APP_DAT, APP_SEC_DOC, APP_SEC_DOC_LIST); }
-
-void rebuildDoctorIndexes()      { rebuildDoctorPrimary();      rebuildDoctorSecondary(); }
-void rebuildAppointmentIndexes() { rebuildAppointmentPrimary(); rebuildAppointmentSecondary(); }
-void rebuildAllIndexes()         { rebuildDoctorIndexes();      rebuildAppointmentIndexes(); }
-
-// Lookups through the primary indexes (binary search, done by the teammate's code).
-// Return the record's byte offset, or a negative number if not found.
-int findDoctor(const string& id)      { return primary_index_doctor_search(DOC_PRI, id); }
-int findAppointment(const string& id) { return primaryindex_Appointments_search(APP_PRI, id); }
-bool doctorExists(const string& id)      { return findDoctor(id) >= 0; }
-bool appointmentExists(const string& id) { return findAppointment(id) >= 0; }
-
-// ---- Key update with SHIFTING in the primary index array --------------------
-// Lower bound by binary search over the first n entries: first position whose
-// key is >= key.
-static int lowerBoundEntries(const vector<PrimaryEntry>& v, int n, const string& key) {
-    int lo = 0, hi = n;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (getField(v[mid].id, ID_LEN) < key) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
-
-// Replaces oldKey by newKey in a primary index file and keeps it sorted by
-// SHIFTING entries: close the hole left by the old key, open a hole at the new
-// key's sorted position, drop the entry (same record offset) into it.
-bool primaryIndexShiftUpdate(const string& indexFile, const string& oldKey, const string& newKey) {
-    ifstream in(indexFile, ios::binary);
-    if (!in) return false;
-    vector<PrimaryEntry> v;
-    PrimaryEntry e;
-    while (in.read(e.id, ID_LEN) && in.read(reinterpret_cast<char*>(&e.offset), sizeof(int)))
-        v.push_back(e);
-    in.close();
-
-    int n = static_cast<int>(v.size());
-    int p = lowerBoundEntries(v, n, oldKey);                       // binary search
-    if (p >= n || getField(v[p].id, ID_LEN) != oldKey) return false;
-
-    PrimaryEntry moved = v[p];                                     // keeps its record offset
-    setField(moved.id, ID_LEN, newKey);
-
-    for (int i = p; i < n - 1; i++) v[i] = v[i + 1];               // shift LEFT: close the hole
-    int m = n - 1;
-    int q = lowerBoundEntries(v, m, newKey);                       // new sorted position
-    for (int i = m; i > q; i--) v[i] = v[i - 1];                   // shift RIGHT: open a hole
-    v[q] = moved;
-
-    ofstream out(indexFile, ios::binary | ios::trunc);
-    for (int i = 0; i < n; i++) {
-        out.write(v[i].id, ID_LEN);
-        out.write(reinterpret_cast<const char*>(&v[i].offset), sizeof(int));
-    }
-    cout << "  (primary index: entry moved from position " << p << " to position " << q << ")\n";
-    return true;
-}
-
-// ============================================================================
-//  4. RECORD BUILDERS + PRINTING
-// ============================================================================
-int insertDoctor(const string& id, const string& name, const string& spec,
-                 const string& addr, bool& reused) {
-    Doctor d;
-    memset(&d, ' ', sizeof(d));
-    setField(d.id, ID_LEN, id);
-    setField(d.name, DNAME_LEN, name);
-    setField(d.specialty, SPEC_LEN, spec);
-    setField(d.address, ADDR_LEN, addr);
-    return insertRecord(DOC_DAT, d, reused);
-}
-
-int insertAppointment(const string& id, const string& date, const string& doctorId, bool& reused) {
-    Appointments a;
-    memset(&a, ' ', sizeof(a));
-    setField(a.ID, ID_LEN, id);
-    setField(a.Date, DATE_LEN, date);
-    setField(a.doctor_ID, ID_LEN, doctorId);
-    return insertRecord(APP_DAT, a, reused);
-}
-
-void printDoctor(const Doctor& d) {
-    cout << "  Doctor ID : " << getField(d.id, ID_LEN) << "\n"
-         << "  Name      : " << getField(d.name, DNAME_LEN) << "\n"
-         << "  Specialty : " << getField(d.specialty, SPEC_LEN) << "\n"
-         << "  Address   : " << getField(d.address, ADDR_LEN) << "\n";
-}
-
-void printAppointment(const Appointments& a) {
-    cout << "  Appointment ID : " << getField(a.ID, ID_LEN) << "\n"
-         << "  Date           : " << getField(a.Date, DATE_LEN) << "\n"
-         << "  Doctor ID      : " << getField(a.doctor_ID, ID_LEN) << "\n";
-}
-
-void printAvail(const string& path) {
-    cout << "  (AVAIL LIST head in header is now " << readHeader(path) << ")\n";
-}
-
-// ============================================================================
-//  5. MENU OPERATIONS
+//  3. MENU OPERATIONS
 // ============================================================================
 
-// ---- Add New Doctor --------------------------------------------------------
-void addDoctor() {
+// ---- Add New Doctor ---------------------------------------------------------
+void addDoctor(QueryEngine& db) {
     string id, name, spec, addr;
     if (!askField("Doctor ID", ID_LEN, id, true, true)) return;
-    if (doctorExists(id)) {
-        cout << "  ! Doctor '" << id << "' already exists. Record not added.\n";
-        return;
-    }
     if (!askField("Doctor Name", DNAME_LEN, name)) return;
     if (!askField("Doctor Specialty", SPEC_LEN, spec)) return;
     if (!askField("Address", ADDR_LEN, addr, false)) return;
 
-    bool reused;
-    int off = insertDoctor(id, name, spec, addr, reused);
-    if (off < 0) { cout << "  ! Could not write to " << DOC_DAT << "\n"; return; }
-    rebuildDoctorIndexes();
-    cout << "  Doctor added at byte offset " << off
-         << (reused ? " (reused a deleted slot from the AVAIL LIST).\n" : " (appended to the end of the file).\n");
-    printAvail(DOC_DAT);
+    bool willReuse = db.GetDoctorFile().GetAvailHead() != -1;
+    if (!db.AddDoctor(id, name, spec, addr)) { cout << "  ! Doctor not added.\n"; return; }
+    db.SaveIndexes();
+    cout << "  Doctor added at byte offset " << db.GetDocPrimaryIndex().Search(id)
+         << (willReuse ? " (reused a deleted slot from the AVAIL LIST).\n"
+                       : " (appended to the end of the file).\n");
+    printAvail(db.GetDoctorFile());
 }
 
-// ---- Add New Appointment ---------------------------------------------------
-void addAppointment() {
+// ---- Add New Appointment ----------------------------------------------------
+void addAppointment(QueryEngine& db) {
     string id, date, docId;
     if (!askField("Appointment ID", ID_LEN, id, true, true)) return;
-    if (appointmentExists(id)) {
-        cout << "  ! Appointment '" << id << "' already exists. Record not added.\n";
-        return;
-    }
     if (!askField("Appointment Date", DATE_LEN, date)) return;
     if (!askField("Doctor ID", ID_LEN, docId, true, true)) return;
-    if (!doctorExists(docId)) {
-        cout << "  ! Doctor '" << docId << "' does not exist. Add the doctor first.\n";
+
+    bool willReuse = db.GetAppointmentFile().GetAvailHead() != -1;
+    if (!db.AddAppointment(id, date, docId)) { cout << "  ! Appointment not added.\n"; return; }
+    db.SaveIndexes();
+    cout << "  Appointment added at byte offset " << db.GetAppPrimaryIndex().Search(id)
+         << (willReuse ? " (reused a deleted slot from the AVAIL LIST).\n"
+                       : " (appended to the end of the file).\n");
+    printAvail(db.GetAppointmentFile());
+}
+
+// ---- Update Doctor Name (non-key field, but a SECONDARY key) ----------------
+void updateDoctorName(QueryEngine& db) {
+    string id, newName;
+    if (!askField("Doctor ID", ID_LEN, id, true, true)) return;
+    Doctor doc;
+    if (!db.SearchDoctorByID(id, doc)) { cout << "  ! Doctor '" << id << "' not found.\n"; return; }
+    if (!askField("New Doctor Name", DNAME_LEN, newName)) return;
+
+    // In-place rewrite; the engine also moves the doctor from the old name's list to the new one.
+    if (!db.UpdateDoctor(id, newName, "", "")) { cout << "  ! Update failed.\n"; return; }
+    db.SaveIndexes();
+    cout << "  Doctor name updated in place (name index updated).\n";
+}
+
+// ---- Update Doctor ID (KEY update) ------------------------------------------
+// This is the exception to the one-call pattern because QueryEngine has no primary-key
+// update operation; the existing index, file, appointment, and secondary-index APIs do
+// each part of the change.
+void updateDoctorID(QueryEngine& db) {
+    string oldId, newId;
+    if (!askField("Current Doctor ID", ID_LEN, oldId, true, true)) return;
+    Doctor doc;
+    if (!db.SearchDoctorByID(oldId, doc)) { cout << "  ! Doctor '" << oldId << "' not found.\n"; return; }
+    if (!askField("New Doctor ID", ID_LEN, newId, true, true)) return;
+    if (newId == oldId) { cout << "  New ID is the same as the old one. Nothing to do.\n"; return; }
+
+    int offset = db.GetDocPrimaryIndex().Search(oldId);
+    string name = QueryEngine::TrimField(doc.name, DNAME_LEN);
+    string spec = QueryEngine::TrimField(doc.specialty, SPEC_LEN);
+    vector<Appointments> apps = db.SearchAppointmentsByDoctorID(oldId);
+
+    int from = -1, to = -1;
+    if (!db.GetDocPrimaryIndex().UpdateKey(oldId, newId, &from, &to)) {
+        cout << "  ! Primary index update failed.\n";
         return;
     }
 
-    bool reused;
-    int off = insertAppointment(id, date, docId, reused);
-    if (off < 0) { cout << "  ! Could not write to " << APP_DAT << "\n"; return; }
-    rebuildAppointmentIndexes();
-    cout << "  Appointment added at byte offset " << off
-         << (reused ? " (reused a deleted slot from the AVAIL LIST).\n" : " (appended to the end of the file).\n");
-    printAvail(APP_DAT);
-}
-
-// ---- Update Doctor Name (non-key field, but a SECONDARY key) ---------------
-void updateDoctorName() {
-    string id, newName;
-    if (!askField("Doctor ID", ID_LEN, id, true, true)) return;
-    int off = findDoctor(id);
-    if (off < 0) { cout << "  ! Doctor '" << id << "' not found.\n"; return; }
-    if (!askField("New Doctor Name", DNAME_LEN, newName)) return;
-
-    Doctor d;
-    if (!readRecordAt(DOC_DAT, off, d)) { cout << "  ! Read error.\n"; return; }
-    setField(d.name, DNAME_LEN, newName);               // in place, exactly 30 bytes
-    if (!writeRecordAt(DOC_DAT, off, d)) { cout << "  ! Write error.\n"; return; }
-    rebuildDoctorSecondary();                            // name index (and its list) changed
-    cout << "  Doctor name updated in place.\n";
-}
-
-// ---- Update Doctor ID (KEY update) -----------------------------------------
-// Policy: the change is CASCADED to every appointment that references the doctor,
-// so no appointment is left pointing at an ID that no longer exists.
-void updateDoctorID() {
-    string oldId, newId;
-    if (!askField("Current Doctor ID", ID_LEN, oldId, true, true)) return;
-    int off = findDoctor(oldId);
-    if (off < 0) { cout << "  ! Doctor '" << oldId << "' not found.\n"; return; }
-    if (!askField("New Doctor ID", ID_LEN, newId, true, true)) return;
-    if (newId == oldId) { cout << "  New ID is the same as the old one. Nothing to do.\n"; return; }
-    if (doctorExists(newId)) { cout << "  ! Doctor ID '" << newId << "' is already in use.\n"; return; }
-
-    // 1. cascade to appointments (must happen BEFORE the secondary index is rebuilt)
-    vector<string> apps = secondaryindex_doctorid_Appointments_search(APP_SEC_DOC, APP_SEC_DOC_LIST, oldId);
-    for (const string& appId : apps) {
-        int aoff = findAppointment(appId);
-        Appointments a;
-        if (aoff >= 0 && readRecordAt(APP_DAT, aoff, a)) {
-            setField(a.doctor_ID, ID_LEN, newId);
-            writeRecordAt(APP_DAT, aoff, a);
-        }
+    // Rewrite the record at its original offset after moving its primary-index key.
+    setField(doc.id, ID_LEN, newId);
+    doc.Pack(db.GetDocBuffer());
+    if (db.GetDoctorFile().Write(offset) == -1) {
+        db.GetDocPrimaryIndex().UpdateKey(newId, oldId);
+        cout << "  ! Could not write the doctor record.\n";
+        return;
     }
 
-    // 2. change the key in the doctor record (same slot, same offset)
-    Doctor d;
-    if (!readRecordAt(DOC_DAT, off, d)) { cout << "  ! Read error.\n"; return; }
-    setField(d.id, ID_LEN, newId);
-    if (!writeRecordAt(DOC_DAT, off, d)) { cout << "  ! Write error.\n"; return; }
+    cout << "  (primary index: entry shifted from position " << from << " to position " << to << ")\n";
 
-    // 3. primary index: SHIFT entries so it stays sorted
-    if (!primaryIndexShiftUpdate(DOC_PRI, oldId, newId)) {
-        cout << "  ! Primary index update failed, rebuilding it from the data file.\n";
-        rebuildDoctorPrimary();
-    }
+    for (const Appointments& a : apps)
+        db.UpdateAppointment(QueryEngine::TrimField(a.ID, ID_LEN), "", newId);
 
-    // 4. secondary indexes hold primary keys, so they must pick up the new ID
-    rebuildDoctorSecondary();           // doc_sec_name + doc_sec_spec lists
-    rebuildAppointmentSecondary();      // app_sec_docID list
+    // Secondary indexes are bound to the primary key, so replace the old ID there too.
+    db.GetDocSecNameIndex().Remove(name.c_str(), oldId.c_str());
+    db.GetDocSecNameIndex().Insert(name.c_str(), newId.c_str());
+    db.GetDocSecSpecIndex().Remove(spec.c_str(), oldId.c_str());
+    db.GetDocSecSpecIndex().Insert(spec.c_str(), newId.c_str());
 
+    db.SaveIndexes();
     cout << "  Doctor ID changed from '" << oldId << "' to '" << newId << "'";
     if (!apps.empty()) cout << " (" << apps.size() << " appointment(s) updated too)";
     cout << ".\n";
 }
 
-// ---- Update Appointment Date (plain non-key field) -------------------------
-void updateAppointmentDate() {
+// ---- Update Appointment Date (plain non-key field) --------------------------
+void updateAppointmentDate(QueryEngine& db) {
     string id, newDate;
     if (!askField("Appointment ID", ID_LEN, id, true, true)) return;
-    int off = findAppointment(id);
-    if (off < 0) { cout << "  ! Appointment '" << id << "' not found.\n"; return; }
+    Appointments app;
+    if (!db.SearchAppointmentByID(id, app)) { cout << "  ! Appointment '" << id << "' not found.\n"; return; }
     if (!askField("New Appointment Date", DATE_LEN, newDate)) return;
-
-    Appointments a;
-    if (!readRecordAt(APP_DAT, off, a)) { cout << "  ! Read error.\n"; return; }
-    setField(a.Date, DATE_LEN, newDate);
-    if (!writeRecordAt(APP_DAT, off, a)) { cout << "  ! Write error.\n"; return; }
+    if (!db.UpdateAppointment(id, newDate, "")) { cout << "  ! Update failed.\n"; return; }
     cout << "  Appointment date updated in place (no index change needed).\n";
 }
 
-// ---- Delete Appointment ----------------------------------------------------
-void deleteAppointment() {
+// ---- Delete Appointment -----------------------------------------------------
+void deleteAppointment(QueryEngine& db) {
     string id;
     if (!askField("Appointment ID", ID_LEN, id, true, true)) return;
-    int off = findAppointment(id);
-    if (off < 0) { cout << "  WARNING: Appointment '" << id << "' does not exist. Nothing deleted.\n"; return; }
-    if (!markDeleted<Appointments>(APP_DAT, off)) { cout << "  ! Could not delete.\n"; return; }
-    rebuildAppointmentIndexes();
+    Appointments app;
+    if (!db.SearchAppointmentByID(id, app)) { cout << "  WARNING: Appointment '" << id << "' does not exist. Nothing deleted.\n"; return; }
+    int off = db.GetAppPrimaryIndex().Search(id);
+    if (!db.DeleteAppointment(id)) { cout << "  ! Could not delete.\n"; return; }
+    db.SaveIndexes();
     cout << "  Appointment '" << id << "' deleted (slot at offset " << off << " added to the AVAIL LIST).\n";
-    printAvail(APP_DAT);
+    printAvail(db.GetAppointmentFile());
 }
 
-// ---- Delete Doctor ---------------------------------------------------------
-// Policy: if the doctor still has appointments, the user chooses between
-// cancelling or deleting those appointments as well.
-void deleteDoctor() {
+// ---- Delete Doctor ----------------------------------------------------------
+// Policy: if the doctor still has appointments, the user chooses between cancelling and
+// deleting those appointments as well.
+void deleteDoctor(QueryEngine& db) {
     string id;
     if (!askField("Doctor ID", ID_LEN, id, true, true)) return;
-    int off = findDoctor(id);
-    if (off < 0) { cout << "  WARNING: Doctor '" << id << "' does not exist. Nothing deleted.\n"; return; }
+    Doctor doc;
+    if (!db.SearchDoctorByID(id, doc)) { cout << "  WARNING: Doctor '" << id << "' does not exist. Nothing deleted.\n"; return; }
+    int off = db.GetDocPrimaryIndex().Search(id);
 
-    vector<string> apps = secondaryindex_doctorid_Appointments_search(APP_SEC_DOC, APP_SEC_DOC_LIST, id);
+    vector<Appointments> apps = db.SearchAppointmentsByDoctorID(id);
     if (!apps.empty()) {
         cout << "  Doctor '" << id << "' has " << apps.size() << " appointment(s).\n";
-        if (!askYesNo("  Delete those appointments as well?")) {
-            cout << "  Delete cancelled.\n";
-            return;
-        }
-        for (const string& appId : apps) {
-            int aoff = findAppointment(appId);
-            if (aoff >= 0) markDeleted<Appointments>(APP_DAT, aoff);
-        }
-        rebuildAppointmentIndexes();
+        if (!askYesNo("  Delete those appointments as well?")) { cout << "  Delete cancelled.\n"; return; }
+        for (const Appointments& a : apps) db.DeleteAppointment(QueryEngine::TrimField(a.ID, ID_LEN));
     }
-
-    if (!markDeleted<Doctor>(DOC_DAT, off)) { cout << "  ! Could not delete.\n"; return; }
-    rebuildDoctorIndexes();
+    if (!db.DeleteDoctor(id)) { cout << "  ! Could not delete.\n"; db.SaveIndexes(); return; }
+    db.SaveIndexes();
     cout << "  Doctor '" << id << "' deleted (slot at offset " << off << " added to the AVAIL LIST).\n";
-    printAvail(DOC_DAT);
+    printAvail(db.GetDoctorFile());
 }
 
-// ---- Print Doctor / Appointment --------------------------------------------
-void printDoctorInfo() {
+// ---- Print Doctor / Appointment ---------------------------------------------
+void printDoctorInfo(QueryEngine& db) {
     string id;
     if (!askField("Doctor ID", ID_LEN, id, true, true)) return;
-    int off = findDoctor(id);
-    Doctor d;
-    if (off < 0 || !readRecordAt(DOC_DAT, off, d)) { cout << "  ! Doctor '" << id << "' not found.\n"; return; }
-    printDoctor(d);
+    db.From(Query::Tokens::Table::Doctors)
+      .Where(Query::Tokens::Field::DoctorID, Query::Tokens::Op::Equals, string(id))
+      .Select(Query::Tokens::Field::All).Print();
 }
 
-void printAppointmentInfo() {
+void printAppointmentInfo(QueryEngine& db) {
     string id;
     if (!askField("Appointment ID", ID_LEN, id, true, true)) return;
-    int off = findAppointment(id);
-    Appointments a;
-    if (off < 0 || !readRecordAt(APP_DAT, off, a)) { cout << "  ! Appointment '" << id << "' not found.\n"; return; }
-    printAppointment(a);
+    db.From(Query::Tokens::Table::Appointments)
+      .Where(Query::Tokens::Field::AppointmentID, Query::Tokens::Op::Equals, string(id))
+      .Select(Query::Tokens::Field::All).Print();
 }
 
-// ---- Write Query -----------------------------------------------------------
-// HOOK for the query engine (owner: teammate).  The menu only reads one line and
-// hands it over.  The engine should parse it dynamically (any table / field /
-// condition combination, not just the 4 examples) and use these lookups:
-//   primary   : primary_index_doctor_search(DOC_PRI, id)        -> offset
-//               primaryindex_Appointments_search(APP_PRI, id)   -> offset
-//   secondary : secondaryindex_doctorname_search(DOC_SEC_NAME, DOC_SEC_NAME_LIST, name)
-//               secondaryindex_doctorspecialty_search(DOC_SEC_SPEC, DOC_SEC_SPEC_LIST, spec)
-//               secondaryindex_doctorid_Appointments_search(APP_SEC_DOC, APP_SEC_DOC_LIST, docId)
-//               (all three return a vector<string> of PRIMARY keys; for "A and B"
-//                intersect the two vectors, then fetch each record via the primary index)
-//   records   : readRecordAt(DOC_DAT / APP_DAT, offset, rec)
-void runQuery(const string& query) {
-    cout << "  [Query engine not connected yet]  Received: " << query << "\n";
-}
-
-void writeQuery() {
+// ---- Write Query ------------------------------------------------------------
+void writeQuery(QueryEngine& db) {
     string q = readLine("Enter query: ");
     if (q.empty()) { cout << "  Empty query.\n"; return; }
-    runQuery(q);
+    QueryResult r = db.Execute(q);
+    r.Print();
 }
 
 // ============================================================================
-//  6. SAMPLE DATA  (assignment: 5 doctors + 10 appointments)
+//  4. SAMPLE DATA (assignment: 5 doctors + 10 appointments)
 // ============================================================================
-void loadSampleData() {
+void loadSampleData(QueryEngine& db) {
     struct D { const char *id, *name, *spec, *addr; };
     struct A { const char *id, *date, *doc; };
     const D docs[] = {
-        {"D1", "Ali",  "Cardio", "Cairo"},
-        {"D2", "Omar", "Neuro",  "Giza"},
-        {"D3", "Mona", "Derma",  "Alex"},
-        {"D4", "Sara", "Cardio", "Tanta"},   // same specialty as D1
-        {"D5", "Ali",  "Ortho",  "Aswan"}    // same name as D1
+        {"D1", "Ali",  "Cardio", "Cairo"}, {"D2", "Omar", "Neuro", "Giza"},
+        {"D3", "Mona", "Derma",  "Alex"},  {"D4", "Sara", "Cardio", "Tanta"},   // same specialty as D1
+        {"D5", "Ali",  "Ortho",  "Aswan"}                                       // same name as D1
     };
     const A apps[] = {
         {"A1",  "2026-11-15 09:00", "D1"}, {"A2",  "2026-11-15 10:30", "D2"},
@@ -511,14 +270,14 @@ void loadSampleData() {
         {"A7",  "2026-11-18 08:30", "D2"}, {"A8",  "2026-11-18 13:20", "D1"},
         {"A9",  "2026-11-19 10:00", "D3"}, {"A10", "2026-11-19 15:40", "D4"}
     };
-    bool reused;
-    for (const D& d : docs) insertDoctor(d.id, d.name, d.spec, d.addr, reused);
-    for (const A& a : apps) insertAppointment(a.id, a.date, a.doc, reused);
+    for (const D& d : docs) db.AddDoctor(d.id, d.name, d.spec, d.addr);
+    for (const A& a : apps) db.AddAppointment(a.id, a.date, a.doc);
+    db.SaveIndexes();
     cout << "  Loaded 5 doctors and 10 appointments.\n";
 }
 
 // ============================================================================
-//  7. MENU + MAIN
+//  5. MENU + MAIN
 // ============================================================================
 void showMenu() {
     cout << "\n==============================================\n"
@@ -540,16 +299,17 @@ void showMenu() {
 
 int main() {
     error_code ec;
-    filesystem::create_directories("data", ec);
-    filesystem::create_directories("indexes", ec);
+    filesystem::create_directories("data", ec);     // BufferFile::Open needs the folder to exist
 
-    bool newDoctors = initDataFile(DOC_DAT);
-    bool newApps    = initDataFile(APP_DAT);
-    if (newDoctors && newApps) {
-        cout << "New data files created.\n";
-        if (askYesNo("Load the sample data (5 doctors, 10 appointments)?")) loadSampleData();
+    QueryEngine db(DOC_DAT, APP_DAT);      // opens both data files and loads the saved indexes
+    db.RebuildIndexes();
+    db.SaveIndexes();
+    bool fresh = db.GetDocPrimaryIndex().IsEmpty() && db.GetAppPrimaryIndex().IsEmpty();
+
+    if (fresh) {
+        cout << "No data found.\n";
+        if (askYesNo("Load the sample data (5 doctors, 10 appointments)?")) loadSampleData(db);
     }
-    rebuildAllIndexes();     // indexes are .ind files on disk; rebuilding at startup keeps them consistent
 
     while (!inputClosed) {
         showMenu();
@@ -560,22 +320,24 @@ int main() {
         try { choice = stoi(line); } catch (...) { choice = 0; }
 
         switch (choice) {
-            case 1:  addDoctor();            break;
-            case 2:  addAppointment();       break;
-            case 3:  updateDoctorName();     break;
-            case 4:  updateDoctorID();       break;
-            case 5:  updateAppointmentDate();break;
-            case 6:  deleteAppointment();    break;
-            case 7:  deleteDoctor();         break;
-            case 8:  printDoctorInfo();      break;
-            case 9:  printAppointmentInfo(); break;
-            case 10: writeQuery();           break;
+            case 1:  addDoctor(db);            break;
+            case 2:  addAppointment(db);       break;
+            case 3:  updateDoctorName(db);     break;
+            case 4:  updateDoctorID(db);       break;
+            case 5:  updateAppointmentDate(db);break;
+            case 6:  deleteAppointment(db);    break;
+            case 7:  deleteDoctor(db);         break;
+            case 8:  printDoctorInfo(db);      break;
+            case 9:  printAppointmentInfo(db); break;
+            case 10: writeQuery(db);           break;
             case 11:
-                cout << "Goodbye.\n";
+                db.SaveIndexes();
+                cout << "Indexes saved. Goodbye.\n";
                 return 0;
             default:
                 cout << "  Invalid option, please enter a number from 1 to 11.\n";
         }
     }
+    db.SaveIndexes();
     return 0;
 }
