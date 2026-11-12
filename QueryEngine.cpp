@@ -43,6 +43,12 @@ namespace
     Field ParseFieldName(const string &rawField)
     {
         string s = ToLower(Trim(rawField));
+        if (s.rfind("doctors.", 0) == 0) s = s.substr(8);
+        else if (s.rfind("doctor.", 0) == 0) s = s.substr(7);
+        else if (s.rfind("appointments.", 0) == 0) s = s.substr(13);
+        else if (s.rfind("appointment.", 0) == 0) s = s.substr(12);
+        s = Trim(s);
+
         if (s == "all" || s == "*")
             return Field::All;
         if (s == "doctor id" || s == "doctor_id" || s == "doctorid" || s == "doc id" || s == "doc_id")
@@ -58,6 +64,36 @@ namespace
         if (s == "appointment date" || s == "appointment_date" || s == "appointmentdate" || s == "date")
             return Field::AppointmentDate;
         return Field::Invalid;
+    }
+
+    bool IsColumnReference(const string &str)
+    {
+        string s = ToLower(Trim(str));
+        if (s.empty())
+            return false;
+        if (s == "appointments.doctor id" || s == "appointments.doctor_id" ||
+            s == "appointment.doctor id" || s == "appointment.doctor_id" ||
+            s == "doctors.doctor id" || s == "doctors.doctor_id" ||
+            s == "doctor.doctor id" || s == "doctor.doctor_id" ||
+            s == "appointments.appointment id" || s == "appointments.appointment_id" ||
+            s == "appointment.appointment id" || s == "appointment.appointment_id" ||
+            s == "appointments.appointment date" || s == "appointments.appointment_date" ||
+            s == "appointment.appointment date" || s == "appointment.appointment_date" ||
+            s == "doctors.doctor name" || s == "doctors.doctor_name" ||
+            s == "doctor.doctor name" || s == "doctor.doctor_name" ||
+            s == "doctors.doctor specialty" || s == "doctors.doctor_specialty" ||
+            s == "doctor.doctor specialty" || s == "doctor.doctor_specialty" ||
+            s == "doctors.address" || s == "doctor.address" ||
+            s == "doctor id" || s == "doctor_id" ||
+            s == "appointment id" || s == "appointment_id" ||
+            s == "appointment date" || s == "appointment_date" ||
+            s == "doctor name" || s == "doctor_name" ||
+            s == "doctor specialty" || s == "doctor_specialty" ||
+            s == "address")
+        {
+            return true;
+        }
+        return false;
     }
 
     string FieldToStringName(Field field)
@@ -442,7 +478,44 @@ bool QueryEngine::MatchesJoined(const Doctor &doc, const Appointments &app, cons
         else if (f == Field::AppointmentID) actual = TrimField(app.ID, sizeof(app.ID));
         else if (f == Field::AppointmentDate) actual = TrimField(app.Date, sizeof(app.Date));
 
-        bool match = EvaluateOp(actual, op, val);
+        string resolvedVal = val;
+        string lowerVal = ToLower(Trim(val));
+        if (lowerVal == "appointments.doctor id" || lowerVal == "appointments.doctor_id" ||
+            lowerVal == "appointment.doctor id" || lowerVal == "appointment.doctor_id")
+        {
+            resolvedVal = TrimField(app.doctor_ID, sizeof(app.doctor_ID));
+        }
+        else if (lowerVal == "doctors.doctor id" || lowerVal == "doctors.doctor_id" ||
+                 lowerVal == "doctor.doctor id" || lowerVal == "doctor.doctor_id")
+        {
+            resolvedVal = TrimField(doc.id, sizeof(doc.id));
+        }
+        else if (lowerVal == "appointments.appointment id" || lowerVal == "appointments.appointment_id" ||
+                 lowerVal == "appointment.appointment id" || lowerVal == "appointment.appointment_id")
+        {
+            resolvedVal = TrimField(app.ID, sizeof(app.ID));
+        }
+        else if (lowerVal == "appointments.appointment date" || lowerVal == "appointments.appointment_date" ||
+                 lowerVal == "appointment.appointment date" || lowerVal == "appointment.appointment_date")
+        {
+            resolvedVal = TrimField(app.Date, sizeof(app.Date));
+        }
+        else if (lowerVal == "doctors.doctor name" || lowerVal == "doctors.doctor_name" ||
+                 lowerVal == "doctor.doctor name" || lowerVal == "doctor.doctor_name")
+        {
+            resolvedVal = TrimField(doc.name, sizeof(doc.name));
+        }
+        else if (lowerVal == "doctors.doctor specialty" || lowerVal == "doctors.doctor_specialty" ||
+                 lowerVal == "doctor.doctor specialty" || lowerVal == "doctor.doctor_specialty")
+        {
+            resolvedVal = TrimField(doc.specialty, sizeof(doc.specialty));
+        }
+        else if (lowerVal == "doctors.address" || lowerVal == "doctor.address")
+        {
+            resolvedVal = TrimField(doc.address, sizeof(doc.address));
+        }
+
+        bool match = EvaluateOp(actual, op, resolvedVal);
         evaluated.emplace_back(match, logic);
     }
 
@@ -1233,15 +1306,18 @@ SearchStrategy QueryEngine::DetermineStrategy(const Instructions &instructions)
     {
         bool hasDocIDEquals = false;
         bool hasNameEquals = false;
+        bool hasSpecEquals = false;
         bool hasAppIDEquals = false;
         for (const auto &cond : wheres)
         {
             Field f = get<0>(cond);
             Op op = get<1>(cond);
-            if (op == Op::Equals)
+            string val = ExtractStringFromAny(get<2>(cond));
+            if (op == Op::Equals && !IsColumnReference(val))
             {
                 if (f == Field::DoctorID) hasDocIDEquals = true;
                 if (f == Field::DoctorName) hasNameEquals = true;
+                if (f == Field::DoctorSpecialty) hasSpecEquals = true;
                 if (f == Field::AppointmentID) hasAppIDEquals = true;
             }
         }
@@ -1249,7 +1325,7 @@ SearchStrategy QueryEngine::DetermineStrategy(const Instructions &instructions)
         {
             if (hasDocIDEquals || hasAppIDEquals)
                 return SearchStrategy::PrimaryIndex;
-            if (hasNameEquals)
+            if (hasNameEquals || hasSpecEquals)
                 return SearchStrategy::SecondaryIndex;
         }
         return SearchStrategy::LinearSearch;
@@ -1698,8 +1774,12 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                 {
                     if (get<0>(cond) == Field::DoctorID && get<1>(cond) == Op::Equals)
                     {
-                        docID = ExtractStringFromAny(get<2>(cond));
-                        break;
+                        string val = ExtractStringFromAny(get<2>(cond));
+                        if (!IsColumnReference(val))
+                        {
+                            docID = val;
+                            break;
+                        }
                     }
                 }
 
@@ -1732,8 +1812,12 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
                     {
                         if (get<0>(cond) == Field::AppointmentID && get<1>(cond) == Op::Equals)
                         {
-                            appID = ExtractStringFromAny(get<2>(cond));
-                            break;
+                            string val = ExtractStringFromAny(get<2>(cond));
+                            if (!IsColumnReference(val))
+                            {
+                                appID = val;
+                                break;
+                            }
                         }
                     }
                     Appointments app;
@@ -1756,16 +1840,32 @@ QueryResult QueryEngine::Execute(const Instructions &instructions)
             else if (result.strategy == SearchStrategy::SecondaryIndex)
             {
                 vector<string> names;
+                vector<string> specs;
                 for (const auto &cond : instructions.where_statment)
                 {
                     if (get<0>(cond) == Field::DoctorName && get<1>(cond) == Op::Equals)
-                        names.push_back(ExtractStringFromAny(get<2>(cond)));
+                    {
+                        string val = ExtractStringFromAny(get<2>(cond));
+                        if (!IsColumnReference(val))
+                            names.push_back(val);
+                    }
+                    if (get<0>(cond) == Field::DoctorSpecialty && get<1>(cond) == Op::Equals)
+                    {
+                        string val = ExtractStringFromAny(get<2>(cond));
+                        if (!IsColumnReference(val))
+                            specs.push_back(val);
+                    }
                 }
 
                 set<int> docOffsets;
                 for (const auto &n : names)
                 {
                     vector<int> offs = docSecNameIndex.Search(n.c_str(), docPrimaryIndex);
+                    docOffsets.insert(offs.begin(), offs.end());
+                }
+                for (const auto &s : specs)
+                {
+                    vector<int> offs = docSecSpecIndex.Search(s.c_str(), docPrimaryIndex);
                     docOffsets.insert(offs.begin(), offs.end());
                 }
 

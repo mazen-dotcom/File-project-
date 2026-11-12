@@ -68,13 +68,18 @@ public:
 
     // Insert a secondary key and its Primary ID.
     bool Insert( const char* secondaryKey,const char* primaryID);
+    bool Insert(const std::string& secondaryKey, const std::string& primaryID);
 
     // Remove a Primary ID from a secondary key.
     bool Remove(const char* secondaryKey,const char* primaryID);
+    bool Remove(const std::string& secondaryKey, const std::string& primaryID);
 
     // Search using Secondary Index
     // and return RRNs using Primary Index.
     std::vector<int> Search( const char* key,const PrimaryIndex& primaryIndex) const;
+    std::vector<int> Search(const std::string& key, const PrimaryIndex& primaryIndex) const;
+
+    int FindIndex(const std::string& key) const;
 
     bool SaveToDisk();
 
@@ -85,6 +90,13 @@ public:
     int GetSize() const;
 
     void Print() const;
+
+    const std::string& GetIndexFileName() const { return indexFileName; }
+    const std::string& GetLinkFileName() const { return linkFileName; }
+    void SetFileNames(const std::string& indexFile, const std::string& linkFile) {
+        indexFileName = indexFile;
+        linkFileName = linkFile;
+    }
 };
 
 #endif
