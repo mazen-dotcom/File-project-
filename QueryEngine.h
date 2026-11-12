@@ -45,7 +45,7 @@ namespace std
 struct Instructions
 {
     Query::Tokens::Table from_statment;
-    std::set<std::tuple<Query::Tokens::Field, Query::Tokens::Op, std::any, Query::Tokens::LogicOp>> where_statment;
+    std::vector<std::tuple<Query::Tokens::Field, Query::Tokens::Op, std::any, Query::Tokens::LogicOp>> where_statment;
     std::set<Query::Tokens::Field> select_statment;
 };
 
@@ -59,6 +59,7 @@ struct QueryResult
 
     std::vector<Doctor> doctors;
     std::vector<Appointments> appointments;
+    std::vector<std::pair<Doctor, Appointments>> joinedRecords;
     std::vector<std::string> formattedOutput;
 
     std::string GetStrategyString() const;
@@ -87,6 +88,10 @@ private:
 
     void InitializeBuffers();
     static std::string ExtractStringFromAny(const std::any &val);
+    static bool EvaluateOp(const std::string &actual, Query::Tokens::Op op, const std::string &val);
+    static bool MatchesDoctor(const Doctor &doc, const Instructions &inst);
+    static bool MatchesAppointment(const Appointments &app, const Instructions &inst);
+    static bool MatchesJoined(const Doctor &doc, const Appointments &app, const Instructions &inst);
 
 public:
     static std::string TrimField(const char *data, size_t maxLen);
@@ -113,6 +118,7 @@ public:
     // Chain of Functions: From -> Where -> Select using Instructions struct
     QueryEngine &From(Query::Tokens::Table table);
     QueryEngine &Where(Query::Tokens::Field field, Query::Tokens::Op op, const std::any &val, Query::Tokens::LogicOp logicOp = Query::Tokens::LogicOp::None);
+    QueryEngine &Where(const std::vector<std::tuple<Query::Tokens::Field, Query::Tokens::Op, std::any, Query::Tokens::LogicOp>> &conditions);
     QueryEngine &Where(const std::set<std::tuple<Query::Tokens::Field, Query::Tokens::Op, std::any, Query::Tokens::LogicOp>> &conditions);
     QueryResult Select(const std::set<Query::Tokens::Field> &fields = {Query::Tokens::Field::All});
     QueryResult Select(std::initializer_list<Query::Tokens::Field> fields);
